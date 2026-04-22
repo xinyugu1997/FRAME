@@ -29,6 +29,8 @@ def run_FRAME(args, config):
     adder_type = config["adder_type"]
     config["goal_type"] = args.end_point
     config['max_depth'] = args.max_steps
+    config['beam_width'] = args.beam_width
+    config['search_strategy'] = args.search_strategy
 
     #Load input files
     try:
@@ -65,6 +67,10 @@ def get_args():
     parser.add_argument('--end_point', choices=['number_steps', 'ref_heavy', 'ref_mw'], default='number_steps',
                         help='Options for when to terminate adding fragments, ref_heavy and ref_mw use provided reference ligand (--endpoint_ligand_path) to determine maximum number of heavy atoms or molecular weight')
     parser.add_argument('--max_steps', type=int, default=5, help='If end point is number_steps, maximum number of fragments to add')
+    parser.add_argument('--search_strategy', choices=['greedy', 'beam'], default='greedy',
+                        help='Search strategy across depths. greedy keeps one branch; beam keeps top-k branches.')
+    parser.add_argument('--beam_width', type=int, default=1,
+                        help='Beam size for beam search. Ignored when search_strategy=greedy.')
     parser.add_argument('--endpoint_ligand_path', type=str, default='', help='If end point is ref_heavy or ref_mw, path to reference .mae file for determine number of fragments to add')
 
     parser.add_argument('--e3nn_env_path', type=str, default='/oak/stanford/groups/rondror/projects/ligand-docking/fragment_building/software/anaconda3/envs/e3nn/lib/python3.8/site-packages', help='To allow using e3nn and custom torch with schrodinger python environment')
