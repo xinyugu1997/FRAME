@@ -64,6 +64,8 @@ class HeuristicFragmentAdder(FragmentAdder, ABC):
         self.max_fragments = config['max_fragments']
         self.max_dihedrals = config['max_dihedrals']
         self.max_depth = config['max_depth']
+        self.beam_width = config.get('beam_width', 1)
+        self.search_strategy = config.get('search_strategy', 'greedy')
         self.debug_config = config['advanced_config']
 
         if (self.debug_config['log_to_file']):
@@ -91,7 +93,10 @@ class HeuristicFragmentAdder(FragmentAdder, ABC):
             self.logger.info(f"Using a number of steps as goal")
             self.goal = {'type': 'depth', 'value': self.max_depth}
 
-        solution = self.greedy_search(start)
+        if self.search_strategy == 'beam':
+            solution = self.beam_search(start, self.beam_width)
+        else:
+            solution = self.greedy_search(start)
         if len(solution) == 1:
             self.logger.info(f"Cannot find any valid fragments to add to ligand...")
             return
@@ -105,6 +110,53 @@ class HeuristicFragmentAdder(FragmentAdder, ABC):
 
         if self.debug_config['save_solutions']:
             solution.write_to_file(output_filename, title_format_func, include_protein=True)
+
+        return solution
+
+    def beam_search(self, start, beam_width):
+        """
+        Beam search, keeps top-k candidates at each depth and expands each of
+        them to the next depth.
+        """
+        if beam_width < 1:
+            raise ValueError(f"beam_width must be >= 1, got {beam_width}")
+
+        solution = LigandNode_List()
+        solution.append(start)
+        beam = [start]
+
+        while beam:
+            if all(self.is_goal_reached(node, None) for node in beam):
+                break
+
+            all_candidates = LigandNode_List()
+
+            for node in beam:
+                if self.is_goal_reached(node, None):
+                    continue
+
+                next_nodes = self.expand_node(node)
+                if len(next_nodes) == 0:
+                    continue
+
+                heuristic_costs = self.heuristic_timed(next_nodes, self.goal)
+                for (next_node, priority) in zip(next_nodes, heuristic_costs):
+                    next_node.score = priority
+                    next_node.parent = node
+                    all_candidates.append(next_node)
+
+            if len(all_candidates) == 0:
+                break
+
+            all_candidates.sort_by_score()
+            beam = [all_candidates.get(i) for i in range(min(beam_width, len(all_candidates)))]
+
+            depth = beam[0].depth
+            self.logger.info(f"\n\tBeam candidates found: {len(all_candidates):} at depth: {depth:} ")
+            self.save_scored_candidates(all_candidates, depth)
+
+            for node in beam:
+                solution.append(node)
 
         return solution
 
@@ -133,6 +185,7 @@ class HeuristicFragmentAdder(FragmentAdder, ABC):
             for (next, priority) in zip(next_nodes, heuristic_costs):
                 candidates.append(next)
                 next.score = priority
+                next.parent = current
 
             candidates.sort_by_score()
 
