@@ -3,12 +3,13 @@ import logging
 import numpy as np
 import time
 import os
+import json
 from abc import ABC, abstractmethod
 
 from src.frag_adder.base_adder import FragmentAdder
 from src.frag_adder.ligand_node import LigandNode, LigandNode_List
 from src.utils.fragment_info.simple_fragment_config import fragment_info
-from src.utils.struc_tools import num_heavy_atoms
+from src.utils.struc_tools import num_heavy_atoms, read_mae
 
 Infinite = float('inf')
 
@@ -66,6 +67,12 @@ class HeuristicFragmentAdder(FragmentAdder, ABC):
         self.max_depth = config['max_depth']
         self.beam_width = config.get('beam_width', 1)
         self.search_strategy = config.get('search_strategy', 'greedy')
+        self.stop_after_open_bond_stage = config.get('stop_after_open_bond_stage', False)
+        self.stop_after_fragment_stage = config.get('stop_after_fragment_stage', False)
+        self.selected_fragment_index = config.get('selected_fragment_index')
+        self.selected_open_atom_from = config.get('selected_open_atom_from')
+        self.selected_open_atom_h = config.get('selected_open_atom_h')
+        self.fragment_candidates_mae_path = config.get('fragment_candidates_mae_path', '')
         self.debug_config = config['advanced_config']
 
         if (self.debug_config['log_to_file']):
@@ -93,7 +100,18 @@ class HeuristicFragmentAdder(FragmentAdder, ABC):
             self.logger.info(f"Using a number of steps as goal")
             self.goal = {'type': 'depth', 'value': self.max_depth}
 
-        if self.search_strategy == 'beam':
+        if self.stop_after_open_bond_stage or self.stop_after_fragment_stage or \
+                (self.selected_fragment_index is not None) or \
+                (self.selected_open_atom_from is not None) or (self.selected_open_atom_h is not None):
+            solution = self.manual_step_search(start)
+            if self.debug_config['save_solutions'] and (solution is not None) and (len(solution) > 1):
+                def title_format_func(node):
+                    f = node.fragname or "None"
+                    s = node.score or 0
+                    return f"d{node.depth}_{f}_{s:.2f}"
+                solution.write_to_file(output_filename, title_format_func, include_protein=True)
+            return solution
+        elif self.search_strategy == 'beam':
             solution = self.beam_search(start, self.beam_width)
         else:
             solution = self.greedy_search(start)
@@ -110,6 +128,146 @@ class HeuristicFragmentAdder(FragmentAdder, ABC):
 
         if self.debug_config['save_solutions']:
             solution.write_to_file(output_filename, title_format_func, include_protein=True)
+
+        return solution
+
+    def _score_open_bonds(self, open_bonds):
+        return [float(self.open_bond_scorefxn(ob, self.goal)) for ob in open_bonds]
+
+    def _write_hook_records(self, records, file_name):
+        with open(file_name, "w") as handle:
+            json.dump(records, handle, indent=2)
+
+    def _write_selected_candidate_json(self, selected_node, depth):
+        if self.debug_config.get('save_candidate_scores_json', False):
+            root = self.debug_config['debug_output_root']
+            chosen = dict(
+                selected_open_atom_from=self.selected_open_atom_from,
+                selected_open_atom_h=self.selected_open_atom_h,
+                selected_fragment_index=self.selected_fragment_index,
+                score=float(selected_node.score) if selected_node.score is not None else None,
+                fragname=selected_node.fragname,
+                attachment_atom=selected_node.get_attachment_atom_original_id()
+                if selected_node.attachment_atom_idx is not None else None,
+                depth=int(selected_node.depth)
+            )
+            self._write_hook_records(chosen, f"{root}d{depth}_selected_candidate.json")
+
+    def _dump_fragment_candidates(self, candidates, depth):
+        root = self.debug_config['debug_output_root']
+        mae_file = f"{root}d{depth}_fragment_candidates.mae"
+        nodes = LigandNode_List()
+        for node in candidates:
+            nodes.append(node)
+
+        def title_format_func(node):
+            return f"d{depth}_{node.fragname}_{node.score:.3f}"
+
+        nodes.write_to_file(mae_file, title_format_func)
+
+    def manual_step_search(self, start):
+        """
+        Manual staged expansion for external orchestration.
+        Stage 1: write scored open-bond candidates, then stop.
+        Stage 2: given selected open bond atom ids, write scored fragment candidates, then stop.
+        Stage 3: given selected fragment index + fragment candidate MAE path, select grown ligand and return it.
+        """
+        solution = LigandNode_List()
+        solution.append(start)
+
+        parent_node = start
+        depth = parent_node.depth + 1
+
+        # Fastest stage-3 path: directly select the chosen candidate from a
+        # stage-2 MAE file, avoiding fragment re-sampling/scoring.
+        if (self.selected_fragment_index is not None) and self.fragment_candidates_mae_path:
+            candidates = read_mae(self.fragment_candidates_mae_path)
+            if self.selected_fragment_index < 0 or self.selected_fragment_index >= len(candidates):
+                raise ValueError(f"Invalid selected_fragment_index {self.selected_fragment_index}, "
+                                 f"expected [0, {len(candidates) - 1}] for file {self.fragment_candidates_mae_path}")
+            selected_ligand = candidates[self.selected_fragment_index]
+            selected_node = LigandNode(parent_node.protein, selected_ligand,
+                                       parent_ligand_size=parent_node.ligand.atom_total,
+                                       depth=parent_node.depth + 1,
+                                       fragname=selected_ligand.title)
+            selected_node.parent = parent_node
+            solution.append(selected_node)
+            self._write_selected_candidate_json(selected_node, depth)
+            return solution
+
+        open_bond = None
+        # Fast restart path for stage 2/3: directly use selected open-bond atoms.
+        if (self.selected_open_atom_from is not None) and (self.selected_open_atom_h is not None):
+            open_bonds_all = self.get_open_bonds(parent_node.ligand)
+            for candidate in open_bonds_all:
+                if (candidate[0].index == self.selected_open_atom_from) and (candidate[1].index == self.selected_open_atom_h):
+                    open_bond = candidate
+                    break
+            if open_bond is None:
+                raise ValueError(f"Could not find open bond ({self.selected_open_atom_from}, {self.selected_open_atom_h})")
+        else:
+            open_bonds = self.sample_open_bonds(parent_node)
+            if len(open_bonds) == 0:
+                self.logger.info("No open bonds found at manual stage.")
+                return solution
+
+            open_bond_scores = self._score_open_bonds(open_bonds)
+            open_bond_records = []
+            for idx, (candidate_open_bond, score) in enumerate(zip(open_bonds, open_bond_scores)):
+                open_bond_records.append(dict(
+                    idx=idx,
+                    score=score,
+                    atom_from=int(candidate_open_bond[0].index),
+                    atom_h=int(candidate_open_bond[1].index),
+                    depth=int(depth)
+                ))
+
+            if self.debug_config.get('save_candidate_scores_json', False):
+                root = self.debug_config['debug_output_root']
+                self._write_hook_records(open_bond_records, f"{root}d{depth}_open_bonds.json")
+
+            if self.stop_after_open_bond_stage:
+                self.logger.info("Manual mode: stopping after open-bond scoring.")
+                return solution
+
+            raise ValueError("Manual stage-2/stage-3 restart requires --selected_open_atom_from and --selected_open_atom_h")
+        raw_fragments = self.sample_fragments(parent_node, open_bond, self.fragname_list)
+        raw_fragments = [n for n in raw_fragments if self.reaction_filter(n)]
+        raw_fragments = self.filter_top(raw_fragments, self.max_fragments, self.fragment_scorefxn)
+
+        fragment_candidates = []
+        for new_node in raw_fragments:
+            candidate_dihedrals = self.sample_dihedrals(new_node, parent_node)
+            candidate_dihedrals = self.filter_top(candidate_dihedrals, self.max_dihedrals, self.dihedral_scorefxn)
+            fragment_candidates.extend(candidate_dihedrals)
+
+        if len(fragment_candidates) == 0:
+            self.logger.info("No fragment candidates found at manual stage.")
+            return solution
+
+        fragment_scores = self.heuristic_timed(fragment_candidates, self.goal)
+        fragment_records = []
+        for idx, (node, score) in enumerate(zip(fragment_candidates, fragment_scores)):
+            node.score = float(score)
+            node.parent = parent_node
+            fragment_records.append(dict(
+                idx=idx,
+                score=float(score),
+                fragname=node.fragname,
+                attachment_atom=node.get_attachment_atom_original_id(),
+                depth=int(node.depth)
+            ))
+
+        if self.debug_config.get('save_candidate_scores_json', False):
+            root = self.debug_config['debug_output_root']
+            self._write_hook_records(fragment_records, f"{root}d{depth}_fragment_candidates.json")
+            self._dump_fragment_candidates(fragment_candidates, depth)
+
+        if self.stop_after_fragment_stage or (self.selected_fragment_index is None):
+            self.logger.info("Manual mode: stopping after fragment scoring.")
+            return solution
+
+        raise ValueError("Stage-3 selection requires --fragment_candidates_mae_path to avoid fragment re-sampling.")
 
         return solution
 
@@ -233,6 +391,22 @@ class HeuristicFragmentAdder(FragmentAdder, ABC):
                 return f"d{depth}_{loc}_{node.fragname}_{node.score:.2f}"
 
             candidates.write_to_file(file_name, title_format_func)
+
+        if self.debug_config.get('save_candidate_scores_json', False):
+            root = self.debug_config['debug_output_root']
+            score_file_name = f"{root}d{depth}_final_candidates_by_heuristic.json"
+            rows = []
+            for rank, node in enumerate(candidates):
+                rows.append(dict(
+                    rank=rank,
+                    depth=node.depth,
+                    score=float(node.score) if node.score is not None else None,
+                    fragname=node.fragname,
+                    attachment_atom=node.get_attachment_atom(),
+                    attachment_atom_original=node.get_attachment_atom_original_id()
+                ))
+            with open(score_file_name, "w") as handle:
+                json.dump(rows, handle, indent=2)
 
     def expand_node(self, parent_node):
         """
