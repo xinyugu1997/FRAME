@@ -32,7 +32,6 @@ def run_FRAME(args, config):
     config['selected_open_atom_from'] = args.selected_open_atom_from
     config['selected_open_atom_h'] = args.selected_open_atom_h
     config['fragment_candidates_mae_path'] = args.fragment_candidates_mae_path
-    write_config(config, os.path.join(output_folder, 'experiment.log'))
 
     #Setup other configuration options
     adder_type = config["adder_type"]
@@ -40,6 +39,9 @@ def run_FRAME(args, config):
     config['max_depth'] = args.max_steps
     config['beam_width'] = args.beam_width
     config['search_strategy'] = args.search_strategy
+
+    # Write the fully resolved runtime config after all CLI overrides have been applied.
+    write_config(config, os.path.join(output_folder, 'experiment.log'))
 
     #Load input files
     try:
