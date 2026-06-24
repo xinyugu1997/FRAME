@@ -232,12 +232,12 @@ class E3NN_Model(nn.Module):
         # flag followed by the fragment flags
         ### Per-channel mean
         if self.use_channel != None:
-            selected = torch.nonzero(data.x[:,self.use_channel])
-            batch = torch.squeeze(data.batch[selected])
+            selected = torch.nonzero(data.x[:,self.use_channel], as_tuple=False).flatten()
+            batch = data.batch[selected]
             '''unique = torch.unique(batch)
             if data.label.shape != unique.shape:
                 import pdb; pdb.set_trace()'''
-            out = scatter_mean(torch.squeeze(out[0][selected]), batch, dim=0)
+            out = scatter_mean(out[0][selected], batch, dim=0)
         else:
             out = scatter_mean(out[0], data.batch, dim=0)
 
