@@ -300,6 +300,7 @@ def score_fragments_for_pocket(args):
     for idx, (node, score, selected_bond) in enumerate(
             zip(fragment_candidates, scores, candidate_open_bonds)):
         node.score = float(score)
+        node.parent = parent_node
         rows.append(
             dict(
                 idx=idx,
@@ -343,7 +344,7 @@ def run_multi_pocket(args):
     pocket_weights = parse_csv_floats(args.pocket_weights)
     random.seed(args.random_seed)
 
-    states = {}
+    initial_states = {}
     for i, (seed_path, pocket_path) in enumerate(zip(seed_paths, pocket_paths)):
         pocket_id = f"pk{i}"
         seed = read_mae(seed_path)[0]
@@ -352,63 +353,82 @@ def run_multi_pocket(args):
         adder.goal = {"type": "depth", "value": args.max_steps}
         adder.debug_config["debug_output_root"] = os.path.join(output_root, pocket_id) + "/"
         os.makedirs(adder.debug_config["debug_output_root"], exist_ok=True)
-        states[pocket_id] = dict(adder=adder, node=LigandNode(pocket, seed))
+        initial_states[pocket_id] = dict(adder=adder, node=LigandNode(pocket, seed))
 
+    branches = [dict(branch_id="b0", states=initial_states)]
     for step in range(1, args.max_steps + 1):
-        with ThreadPoolExecutor(max_workers=len(states)) as executor:
-            jobs = [
-                (pid, s["adder"], s["node"])
-                for pid, s in states.items()
-            ]
-            open_payload = dict(executor.map(score_open_bonds_for_pocket, jobs))
+        next_branches = []
+        for branch in branches:
+            branch_id = branch["branch_id"]
+            states = branch["states"]
+            with ThreadPoolExecutor(max_workers=len(states)) as executor:
+                jobs = [
+                    (pid, s["adder"], s["node"])
+                    for pid, s in states.items()
+                ]
+                open_payload = dict(executor.map(score_open_bonds_for_pocket, jobs))
 
-        dump_json(os.path.join(output_root, f"d{step}_open_bonds_all_pockets.json"), open_payload)
-        selected_open = select_open_bond_across_pockets(
-            open_payload, step, pocket_weights, args.num_open_bonds_to_sample)
-        dump_json(os.path.join(output_root, f"d{step}_selected_open_bonds.json"), selected_open)
+            dump_json(
+                os.path.join(output_root, f"d{step}_{branch_id}_open_bonds_all_pockets.json"),
+                open_payload)
+            selected_open = select_open_bond_across_pockets(
+                open_payload, step, pocket_weights, args.num_open_bonds_to_sample)
+            dump_json(
+                os.path.join(output_root, f"d{step}_{branch_id}_selected_open_bonds.json"),
+                selected_open)
 
-        with ThreadPoolExecutor(max_workers=len(states)) as executor:
-            jobs = [
-                (pid, s["adder"], s["node"], selected_open)
-                for pid, s in states.items()
-            ]
-            fragment_results = list(executor.map(score_fragments_for_pocket, jobs))
+            with ThreadPoolExecutor(max_workers=len(states)) as executor:
+                jobs = [
+                    (pid, s["adder"], s["node"], selected_open)
+                    for pid, s in states.items()
+                ]
+                fragment_results = list(executor.map(score_fragments_for_pocket, jobs))
 
-        fragment_payload = {}
-        fragment_nodes = {}
-        for pocket_id, rows, candidates in fragment_results:
-            fragment_payload[pocket_id] = rows
-            fragment_nodes[pocket_id] = candidates
-            if len(candidates):
-                mae_path = os.path.join(output_root, f"d{step}_{pocket_id}_fragment_candidates.mae")
-                dump_fragment_mae(mae_path, candidates)
+            fragment_payload = {}
+            fragment_nodes = {}
+            for pocket_id, rows, candidates in fragment_results:
+                fragment_payload[pocket_id] = rows
+                fragment_nodes[pocket_id] = candidates
+                if len(candidates):
+                    mae_path = os.path.join(
+                        output_root, f"d{step}_{branch_id}_{pocket_id}_fragment_candidates.mae")
+                    dump_fragment_mae(mae_path, candidates)
 
-        dump_json(os.path.join(output_root, f"d{step}_fragment_candidates_all_pockets.json"), fragment_payload)
-        selected_frag = select_fragment_across_pockets(
-            fragment_payload, step, pocket_weights, args.num_fragments_to_sample)
-        dump_json(os.path.join(output_root, f"d{step}_selected_fragments.json"), selected_frag)
+            dump_json(
+                os.path.join(output_root, f"d{step}_{branch_id}_fragment_candidates_all_pockets.json"),
+                fragment_payload)
+            selected_frag = select_fragment_across_pockets(
+                fragment_payload, step, pocket_weights, args.num_fragments_to_sample)
+            dump_json(
+                os.path.join(output_root, f"d{step}_{branch_id}_selected_fragments.json"),
+                selected_frag)
 
-        if not selected_frag["fragments"]:
-            raise ValueError("No fragments were selected")
+            if not selected_frag["fragments"]:
+                raise ValueError("No fragments were selected")
 
-        for selection_idx, selected in enumerate(selected_frag["fragments"]):
-            for pocket_id, sel_idx in selected["indices_by_pocket"].items():
-                candidates = fragment_nodes[pocket_id]
-                if sel_idx < 0 or sel_idx >= len(candidates):
-                    raise ValueError(f"Invalid fragment index {sel_idx} for {pocket_id}")
-                out_file = os.path.join(
-                    output_root, f"d{step}_selected_fragment_{selection_idx}_{pocket_id}.mae")
-                write_mae(out_file, [candidates[sel_idx].ligand])
-
-        # Continue the growth trajectory with the first unique sampled fragment.
-        first_selected = selected_frag["fragments"][0]
-        for pocket_id, sel_idx in first_selected["indices_by_pocket"].items():
-            states[pocket_id]["node"] = fragment_nodes[pocket_id][sel_idx]
+            for selection_idx, selected in enumerate(selected_frag["fragments"]):
+                next_states = {}
+                next_branch_id = f"{branch_id}_s{step}_{selection_idx}"
+                for pocket_id, sel_idx in selected["indices_by_pocket"].items():
+                    candidates = fragment_nodes[pocket_id]
+                    if sel_idx < 0 or sel_idx >= len(candidates):
+                        raise ValueError(f"Invalid fragment index {sel_idx} for {pocket_id}")
+                    out_file = os.path.join(
+                        output_root,
+                        f"d{step}_{next_branch_id}_{pocket_id}_selected_fragment.mae")
+                    write_mae(out_file, [candidates[sel_idx].ligand])
+                    next_states[pocket_id] = dict(
+                        adder=states[pocket_id]["adder"],
+                        node=candidates[sel_idx],
+                    )
+                next_branches.append(dict(branch_id=next_branch_id, states=next_states))
+        branches = next_branches
 
     # Save final grown ligands for each pocket.
-    for pocket_id, state in states.items():
-        out_file = os.path.join(output_root, f"{pocket_id}_final.mae")
-        write_mae(out_file, [state["node"].ligand])
+    for branch in branches:
+        for pocket_id, state in branch["states"].items():
+            out_file = os.path.join(output_root, f"{branch['branch_id']}_{pocket_id}_final.mae")
+            write_mae(out_file, [state["node"].ligand])
 
 
 def get_args():
