@@ -113,18 +113,114 @@ def select_open_bond_across_pockets(
     return dict(open_bonds=selected_bonds)
 
 
-def select_fragment_across_pockets(fragment_payload, step_idx):
+def select_fragment_across_pockets(
+        fragment_payload, step_idx, pocket_weights=None,
+        num_fragments_to_sample=1):
     """
-    TODO: Implement multi-pocket fragment selection criterion.
+    Select fragments by weighted best-dihedral scores across pockets.
 
-    Expected return:
+    Fragment candidates are grouped by (open_atom_from, open_atom_h, fragname).
+    Within each pocket and fragment group, only the candidate dihedral with the
+    lowest score is kept. The kept scores are combined with pocket weights,
+    converted into sampling probabilities with softmax over negated weighted
+    scores, sampled with replacement, and de-duplicated while preserving sample
+    order.
+
+    Returns:
       {
-        "indices_by_pocket": {
-          "<pocket_id>": int
-        }
+        "fragments": [
+          {
+            "fragname": str,
+            "open_atom_from": int,
+            "open_atom_h": int,
+            "score": float,
+            "probability": float,
+            "scores_by_pocket": {"<pocket_id>": float},
+            "indices_by_pocket": {"<pocket_id>": int}
+          }
+        ]
       }
     """
-    raise NotImplementedError("Implement select_fragment_across_pockets(...)")
+    if not fragment_payload:
+        raise ValueError("No fragment payloads were provided")
+    if num_fragments_to_sample < 1:
+        raise ValueError("num_fragments_to_sample must be >= 1")
+
+    pocket_ids = list(fragment_payload.keys())
+    if pocket_weights is None or len(pocket_weights) == 0:
+        pocket_weights = [1.0 for _ in pocket_ids]
+    if len(pocket_weights) != len(pocket_ids):
+        raise ValueError(
+            f"Expected {len(pocket_ids)} pocket weights, got {len(pocket_weights)}")
+
+    weights_by_pocket = dict(zip(pocket_ids, pocket_weights))
+    best_by_fragment = {}
+    expected_pocket_count = len(fragment_payload)
+
+    for pocket_id, rows in fragment_payload.items():
+        for row in rows:
+            fragment_key = (
+                row.get("open_atom_from"),
+                row.get("open_atom_h"),
+                row["fragname"],
+            )
+            score = float(row["score"])
+            current_best = best_by_fragment.setdefault(fragment_key, {}).get(pocket_id)
+            if current_best is None or score < current_best["score"]:
+                best_by_fragment[fragment_key][pocket_id] = dict(
+                    score=score,
+                    idx=int(row["idx"]),
+                )
+
+    common_fragments = [
+        fragment_key
+        for fragment_key, pocket_rows in best_by_fragment.items()
+        if len(pocket_rows) == expected_pocket_count
+    ]
+    if not common_fragments:
+        raise ValueError("No fragment candidate is available in every pocket")
+
+    weighted_scores_by_fragment = {}
+    scores_by_fragment = {}
+    indices_by_fragment = {}
+    for fragment_key in common_fragments:
+        weighted_score = 0.0
+        scores_by_fragment[fragment_key] = {}
+        indices_by_fragment[fragment_key] = {}
+        for pocket_id, best_row in best_by_fragment[fragment_key].items():
+            weighted_score += weights_by_pocket[pocket_id] * best_row["score"]
+            scores_by_fragment[fragment_key][pocket_id] = best_row["score"]
+            indices_by_fragment[fragment_key][pocket_id] = best_row["idx"]
+        weighted_scores_by_fragment[fragment_key] = weighted_score
+
+    logits = [-weighted_scores_by_fragment[key] for key in common_fragments]
+    max_logit = max(logits)
+    exp_logits = [math.exp(logit - max_logit) for logit in logits]
+    normalizer = sum(exp_logits)
+    probabilities = [value / normalizer for value in exp_logits]
+
+    sampled_fragments = random.choices(
+        common_fragments, weights=probabilities, k=num_fragments_to_sample)
+
+    selected_fragments = []
+    seen = set()
+    probability_by_fragment = dict(zip(common_fragments, probabilities))
+    for fragment_key in sampled_fragments:
+        if fragment_key in seen:
+            continue
+        seen.add(fragment_key)
+        open_atom_from, open_atom_h, fragname = fragment_key
+        selected_fragments.append(dict(
+            fragname=fragname,
+            open_atom_from=open_atom_from,
+            open_atom_h=open_atom_h,
+            score=weighted_scores_by_fragment[fragment_key],
+            probability=probability_by_fragment[fragment_key],
+            scores_by_pocket=scores_by_fragment[fragment_key],
+            indices_by_pocket=indices_by_fragment[fragment_key],
+        ))
+
+    return dict(fragments=selected_fragments)
 
 
 def dump_json(path, obj):
@@ -288,13 +384,26 @@ def run_multi_pocket(args):
                 dump_fragment_mae(mae_path, candidates)
 
         dump_json(os.path.join(output_root, f"d{step}_fragment_candidates_all_pockets.json"), fragment_payload)
-        selected_frag = select_fragment_across_pockets(fragment_payload, step)
+        selected_frag = select_fragment_across_pockets(
+            fragment_payload, step, pocket_weights, args.num_fragments_to_sample)
+        dump_json(os.path.join(output_root, f"d{step}_selected_fragments.json"), selected_frag)
 
-        for pocket_id, sel_idx in selected_frag["indices_by_pocket"].items():
-            candidates = fragment_nodes[pocket_id]
-            if sel_idx < 0 or sel_idx >= len(candidates):
-                raise ValueError(f"Invalid fragment index {sel_idx} for {pocket_id}")
-            states[pocket_id]["node"] = candidates[sel_idx]
+        if not selected_frag["fragments"]:
+            raise ValueError("No fragments were selected")
+
+        for selection_idx, selected in enumerate(selected_frag["fragments"]):
+            for pocket_id, sel_idx in selected["indices_by_pocket"].items():
+                candidates = fragment_nodes[pocket_id]
+                if sel_idx < 0 or sel_idx >= len(candidates):
+                    raise ValueError(f"Invalid fragment index {sel_idx} for {pocket_id}")
+                out_file = os.path.join(
+                    output_root, f"d{step}_selected_fragment_{selection_idx}_{pocket_id}.mae")
+                write_mae(out_file, [candidates[sel_idx].ligand])
+
+        # Continue the growth trajectory with the first unique sampled fragment.
+        first_selected = selected_frag["fragments"][0]
+        for pocket_id, sel_idx in first_selected["indices_by_pocket"].items():
+            states[pocket_id]["node"] = fragment_nodes[pocket_id][sel_idx]
 
     # Save final grown ligands for each pocket.
     for pocket_id, state in states.items():
@@ -315,6 +424,9 @@ def get_args():
                         help="Comma-separated pocket weights. Defaults to equal weights.")
     parser.add_argument("--num_open_bonds_to_sample", type=int, default=1,
                         help="Number of open-bond samples to draw from the "
+                             "weighted-score softmax before de-duplication.")
+    parser.add_argument("--num_fragments_to_sample", type=int, default=1,
+                        help="Number of fragment samples to draw from the "
                              "weighted-score softmax before de-duplication.")
     parser.add_argument("--random_seed", type=int, default=10,
                         help="Random seed for softmax open-bond sampling.")
