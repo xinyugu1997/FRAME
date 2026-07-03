@@ -22,6 +22,56 @@ def parse_csv_floats(text):
     return [float(x.strip()) for x in text.split(",") if x.strip()]
 
 
+def _bonded_atom_indices(atom):
+    return sorted(neighbor.index for neighbor in atom.bonded_atoms)
+
+
+def _atom_identity(atom):
+    return dict(
+        index=int(atom.index),
+        element=atom.element,
+        atomic_number=int(atom.atomic_number),
+        bonded_atom_indices=_bonded_atom_indices(atom),
+    )
+
+
+def validate_ligand_atom_index_consistency(states, context):
+    """
+    Validate that each pocket's ligand uses the same atom-index identity map.
+
+    Multi-pocket selection matches open bonds across pockets by atom index, so
+    every pocket must keep the same atom index -> chemical atom mapping during
+    the whole growth trajectory. Coordinates are intentionally ignored because
+    each pocket can have a different 3D pose; atom count, element/atomic number,
+    and bonded-neighbor indices must remain identical.
+    """
+    if not states:
+        raise ValueError(f"{context}: no pocket states were provided")
+
+    pocket_ids = list(states.keys())
+    reference_pocket_id = pocket_ids[0]
+    reference_ligand = states[reference_pocket_id]["node"].ligand
+    reference_signature = [_atom_identity(atom) for atom in reference_ligand.atom]
+
+    for pocket_id in pocket_ids[1:]:
+        ligand = states[pocket_id]["node"].ligand
+        if ligand.atom_total != reference_ligand.atom_total:
+            raise ValueError(
+                f"{context}: ligand atom count mismatch between "
+                f"{reference_pocket_id} ({reference_ligand.atom_total}) and "
+                f"{pocket_id} ({ligand.atom_total})"
+            )
+
+        signature = [_atom_identity(atom) for atom in ligand.atom]
+        for reference_atom, atom in zip(reference_signature, signature):
+            if atom != reference_atom:
+                raise ValueError(
+                    f"{context}: ligand atom-index identity mismatch at atom "
+                    f"{reference_atom['index']} between {reference_pocket_id} "
+                    f"and {pocket_id}. Expected {reference_atom}, got {atom}."
+                )
+
+
 def select_open_bond_across_pockets(
         open_bond_payload, step_idx, pocket_weights=None,
         num_open_bonds_to_sample=1):
@@ -490,6 +540,11 @@ def run_multi_pocket(args):
         os.makedirs(adder.debug_config["debug_output_root"], exist_ok=True)
         initial_states[pocket_id] = dict(adder=adder, node=LigandNode(pocket, seed))
 
+    validate_ligand_atom_index_consistency(
+        initial_states,
+        context="initial multi-pocket seed ligands",
+    )
+
     branches = [dict(branch_id="b0", states=initial_states)]
     for step in range(1, args.max_steps + 1):
         next_branches = []
@@ -556,6 +611,10 @@ def run_multi_pocket(args):
                         adder=states[pocket_id]["adder"],
                         node=candidates[sel_idx],
                     )
+                validate_ligand_atom_index_consistency(
+                    next_states,
+                    context=f"step {step} branch {next_branch_id}",
+                )
                 next_branches.append(dict(branch_id=next_branch_id, states=next_states))
         branches = next_branches
 
@@ -567,7 +626,7 @@ def run_multi_pocket(args):
 
 
 def get_args():
-    parser = argparse.ArgumentParser(description="Multi-pocket FRAME growth")
+    parser = argparse.ArgumentParser(description="Run multi-pocket FRAME growth")
     parser.add_argument("--config_name", choices=["config_random", "config_ML"], default="config_ML")
     parser.add_argument("--seed_ligand_paths", type=str, required=True,
                         help="Comma-separated list of seed ligand MAE paths (one per pocket).")
