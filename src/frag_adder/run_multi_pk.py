@@ -589,6 +589,10 @@ def get_args():
                         default="/oak/stanford/groups/rondror/projects/ligand-docking/fragment_building/software/anaconda3/envs/e3nn/lib/python3.8/site-packages")
     return parser.parse_args()
 
+'''
+$SCHRODINGER/run python3 -m src.frag_adder.run_multi_pk --config_name config_ML --output_folder_path ./test_outputs --seed_ligand_path ./data/test_inputs/3C49_seed_ligand.mae --protein_pocket_path ./data/test_inputs/3C49_pocket.mae --end_point number_steps --max_steps 5
+'''
+
 
 def main():
     args = get_args()
