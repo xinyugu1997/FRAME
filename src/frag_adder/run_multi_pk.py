@@ -12,6 +12,10 @@ from src.frag_adder.ligand_node import LigandNode, LigandNode_List
 from src.utils.struc_tools import read_mae, write_mae
 
 
+class BranchExhaustedError(RuntimeError):
+    """Raised when the current branch has no valid growth moves left."""
+
+
 def parse_csv_paths(text):
     return [x.strip() for x in text.split(",") if x.strip()]
 
@@ -131,7 +135,7 @@ def select_open_bond_across_pockets(
         if len(pocket_scores) == expected_pocket_count
     ]
     if not common_bonds:
-        raise ValueError("No open bond is available in every pocket")
+        raise BranchExhaustedError("No open bond is available in every pocket")
 
     # Lower weighted score should have higher sampling probability. Subtract the
     # max logit for numerical stability.
@@ -346,7 +350,8 @@ def select_fragment_across_pockets(
         if count == num_pockets
     ]
     if not common_frag_ids:
-        raise ValueError("No fragment candidate is available in every pocket")
+        raise BranchExhaustedError(
+            "No fragment candidate is available in every pocket")
 
     # Pass 2: weighted score for each common fragment
     weighted_scores = []
@@ -423,6 +428,38 @@ def dump_fragment_mae(path, candidates):
         return f"d{node.depth}_{node.fragname}_{s:.3f}"
 
     candidate_nodes.write_to_file(path, title_format_func)
+
+
+def save_branch_ligands(output_root, branch, status_suffix="final"):
+    """Save the current ligand for every pocket in a branch."""
+    for pocket_id, state in branch["states"].items():
+        out_file = os.path.join(
+            output_root, f"{branch['branch_id']}_{pocket_id}_{status_suffix}.mae")
+        write_mae(out_file, [state["node"].ligand])
+
+
+def save_stopped_branch(output_root, branch, step, reason):
+    """
+    Save a branch that cannot be expanded further and record why it stopped.
+
+    The branch contains ligands after the previous completed growth step.  For
+    example, if expansion fails while attempting step 5, the saved ligands are
+    the depth-4 solution for that branch.
+    """
+    stopped_depth = max(step - 1, 0)
+    status_suffix = f"stopped_d{stopped_depth}_final"
+    save_branch_ligands(output_root, branch, status_suffix=status_suffix)
+    dump_json(
+        os.path.join(
+            output_root,
+            f"{branch['branch_id']}_stopped_d{stopped_depth}_reason.json"),
+        dict(
+            branch_id=branch["branch_id"],
+            stopped_at_attempted_step=int(step),
+            saved_depth=int(stopped_depth),
+            reason=str(reason),
+        ),
+    )
 
 
 def resolve_open_bond_by_atoms(adder, parent_node, atom_from, atom_h):
@@ -561,8 +598,12 @@ def run_multi_pocket(args):
             dump_json(
                 os.path.join(output_root, f"d{step}_{branch_id}_open_bonds_all_pockets.json"),
                 open_payload)
-            selected_open = select_open_bond_across_pockets(
-                open_payload, step, pocket_weights, args.num_open_bonds_to_sample)
+            try:
+                selected_open = select_open_bond_across_pockets(
+                    open_payload, step, pocket_weights, args.num_open_bonds_to_sample)
+            except BranchExhaustedError as error:
+                save_stopped_branch(output_root, branch, step, error)
+                continue
             dump_json(
                 os.path.join(output_root, f"d{step}_{branch_id}_selected_open_bonds.json"),
                 selected_open)
@@ -587,14 +628,21 @@ def run_multi_pocket(args):
             dump_json(
                 os.path.join(output_root, f"d{step}_{branch_id}_fragment_candidates_all_pockets.json"),
                 fragment_payload)
-            selected_frag = select_fragment_across_pockets(
-                fragment_payload, step, pocket_weights, args.num_fragments_to_sample)
+            try:
+                selected_frag = select_fragment_across_pockets(
+                    fragment_payload, step, pocket_weights, args.num_fragments_to_sample)
+            except BranchExhaustedError as error:
+                save_stopped_branch(output_root, branch, step, error)
+                continue
             dump_json(
                 os.path.join(output_root, f"d{step}_{branch_id}_selected_fragments.json"),
                 selected_frag)
 
             if not selected_frag["fragments"]:
-                raise ValueError("No fragments were selected")
+                save_stopped_branch(
+                    output_root, branch, step,
+                    BranchExhaustedError("No fragments were selected"))
+                continue
 
             for selection_idx, selected in enumerate(selected_frag["fragments"]):
                 next_states = {}
@@ -617,12 +665,12 @@ def run_multi_pocket(args):
                 )
                 next_branches.append(dict(branch_id=next_branch_id, states=next_states))
         branches = next_branches
+        if not branches:
+            break
 
     # Save final grown ligands for each pocket.
     for branch in branches:
-        for pocket_id, state in branch["states"].items():
-            out_file = os.path.join(output_root, f"{branch['branch_id']}_{pocket_id}_final.mae")
-            write_mae(out_file, [state["node"].ligand])
+        save_branch_ligands(output_root, branch)
 
 
 def get_args():
