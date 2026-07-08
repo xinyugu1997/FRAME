@@ -638,12 +638,6 @@ def run_multi_pocket(args):
                 os.path.join(output_root, f"d{step}_{branch_id}_selected_fragments.json"),
                 selected_frag)
 
-            if not selected_frag["fragments"]:
-                save_stopped_branch(
-                    output_root, branch, step,
-                    BranchExhaustedError("No fragments were selected"))
-                continue
-
             for selection_idx, selected in enumerate(selected_frag["fragments"]):
                 next_states = {}
                 next_branch_id = f"{branch_id}_s{step}_{selection_idx}"
