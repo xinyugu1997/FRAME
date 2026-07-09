@@ -115,7 +115,12 @@ def select_open_bond_across_pockets(
         raise ValueError(
             f"Expected {len(pocket_ids)} pocket weights, got {len(pocket_weights)}")
 
-    weights_by_pocket = dict(zip(pocket_ids, pocket_weights))
+    # Open-bond score summaries should only include positively weighted pockets.
+    # Treat zero/negative pocket weights as disabled for this selection stage.
+    weights_by_pocket = {
+        pocket_id: max(0.0, float(weight))
+        for pocket_id, weight in zip(pocket_ids, pocket_weights)
+    }
     weighted_scores_by_bond = {}
     raw_scores_by_bond = {}
     expected_pocket_count = len(open_bond_payload)
@@ -353,7 +358,30 @@ def select_fragment_across_pockets(
         raise BranchExhaustedError(
             "No fragment candidate is available in every pocket")
 
-    # Pass 2: weighted score for each common fragment
+    # Step 1: pre-filter fragments using a positive-weight-only score summary.
+    # Pockets with zero/negative weights are ignored for this thresholding step.
+    positive_pocket_weights = [max(0.0, weight) for weight in pocket_weights]
+    positive_weighted_scores = []
+    for frag_id in common_frag_ids:
+        score_vec = best_scores[frag_id]
+        positive_weighted_score = 0.0
+        for pocket_idx, weight in enumerate(positive_pocket_weights):
+            positive_weighted_score += weight * score_vec[pocket_idx]
+        positive_weighted_scores.append(positive_weighted_score)
+
+    lowest_fragment_score = min(positive_weighted_scores)
+    highest_fragment_score = max(positive_weighted_scores)
+    fragment_score_cutoff = (
+        0.8 * lowest_fragment_score + 0.2 * highest_fragment_score
+    )
+    common_frag_ids = [
+        frag_id
+        for frag_id, positive_weighted_score in zip(
+            common_frag_ids, positive_weighted_scores
+        )
+        if positive_weighted_score <= fragment_score_cutoff
+    ]
+    # Step 2: weighted score for each fragment that passed the pre-filter.
     weighted_scores = []
     for frag_id in common_frag_ids:
         score_vec = best_scores[frag_id]
