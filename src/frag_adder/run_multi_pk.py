@@ -591,6 +591,9 @@ def run_multi_pocket(args):
     config["max_depth"] = args.max_steps
     config["goal_type"] = "number_steps"
     config["advanced_config"]["save_candidate_scores_json"] = True
+    # Multi-pocket runs emit stage-specific JSON/MAE outputs for each pocket,
+    # so do not create the default adder-level debug.log file.
+    config["advanced_config"]["log_to_file"] = False
 
     output_root = args.output_folder_path
     os.makedirs(output_root, exist_ok=True)
