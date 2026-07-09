@@ -287,17 +287,20 @@ def select_fragment_across_pockets(
     step_idx,
     pocket_weights=None,
     num_fragments_to_sample=1,
+    cutoff_ratio=0.2,
 ):
     """
     Memory-friendlier version:
     - uses integer fragment IDs internally
     - uses pocket indices internally
     - reconstructs tuple/string fields only for selected fragments
+    - pre-filters with (1 - cutoff_ratio) * lowest + cutoff_ratio * highest
     """
     if not fragment_payload:
         raise ValueError("No fragment payloads were provided")
     if num_fragments_to_sample < 1:
         raise ValueError("num_fragments_to_sample must be >= 1")
+    cutoff_ratio = float(cutoff_ratio)
 
     pocket_ids = list(fragment_payload.keys())
     num_pockets = len(pocket_ids)
@@ -372,7 +375,8 @@ def select_fragment_across_pockets(
     lowest_fragment_score = min(positive_weighted_scores)
     highest_fragment_score = max(positive_weighted_scores)
     fragment_score_cutoff = (
-        0.8 * lowest_fragment_score + 0.2 * highest_fragment_score
+        (1.0 - cutoff_ratio) * lowest_fragment_score
+        + cutoff_ratio * highest_fragment_score
     )
     common_frag_ids = [
         frag_id
