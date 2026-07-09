@@ -94,6 +94,27 @@ class LigandNode:
 
             attachment_atom_bonds = get_bonded_indices(self.ligand, self.get_attachment_atom())
             branchpoint_atom_idx = attachment_atom_bonds[-1]
+
+            if branchpoint_atom_idx < self.parent_ligand_size:
+                print("DEBUG get_branchpoint_atom failure")
+                print("  fragname:", self.fragname)
+                print("  depth:", self.depth)
+                print("  parent_ligand_size:", self.parent_ligand_size)
+                print("  ligand.atom_total:", self.ligand.atom_total)
+                print("  original_atom_idx:", self.original_atom_idx)
+                print("  attachment_atom_idx:", attachment_atom_idx)
+                print("  attachment_atom_bonds:", attachment_atom_bonds)
+                print("  picked_branchpoint_atom_idx:", branchpoint_atom_idx)
+                print("  atom table:")
+                for atom in self.ligand.atom:
+                    print(
+                        "   ",
+                        atom.index,
+                        atom.element,
+                        "bonds=",
+                        sorted(a.index for a in atom.bonded_atoms),
+                    )
+
             assert branchpoint_atom_idx >= self.parent_ligand_size, \
                 f"Branch point index {branchpoint_atom_idx:} < {self.parent_ligand_size:}"
 
