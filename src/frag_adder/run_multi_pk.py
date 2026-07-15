@@ -1,4 +1,5 @@
 import argparse
+import copy
 import json
 import math
 import os
@@ -591,9 +592,6 @@ def run_multi_pocket(args):
     config["max_depth"] = args.max_steps
     config["goal_type"] = "number_steps"
     config["advanced_config"]["save_candidate_scores_json"] = True
-    # Multi-pocket runs emit stage-specific JSON/MAE outputs for each pocket,
-    # so do not create the default adder-level debug.log file.
-    config["advanced_config"]["log_to_file"] = False
 
     output_root = args.output_folder_path
     os.makedirs(output_root, exist_ok=True)
@@ -606,10 +604,14 @@ def run_multi_pocket(args):
         pocket_id = f"pk{i}"
         seed = read_mae(seed_path)[0]
         pocket = read_mae(pocket_path)[0]
-        adder = initialize_adder(config.copy(), args.e3nn_env_path)
+        pocket_config = copy.deepcopy(config)
+        pocket_debug_root = os.path.join(output_root, pocket_id)
+        os.makedirs(pocket_debug_root, exist_ok=True)
+        pocket_config["advanced_config"]["debug_output_root"] = pocket_debug_root + os.sep
+        pocket_config["advanced_config"]["log_file"] = os.path.join(
+            pocket_debug_root, "debug.log")
+        adder = initialize_adder(pocket_config, args.e3nn_env_path)
         adder.goal = {"type": "depth", "value": args.max_steps}
-        adder.debug_config["debug_output_root"] = os.path.join(output_root, pocket_id) + "/"
-        os.makedirs(adder.debug_config["debug_output_root"], exist_ok=True)
         initial_states[pocket_id] = dict(adder=adder, node=LigandNode(pocket, seed))
 
     validate_ligand_atom_index_consistency(
@@ -633,6 +635,12 @@ def run_multi_pocket(args):
             dump_json(
                 os.path.join(output_root, f"d{step}_{branch_id}_open_bonds_all_pockets.json"),
                 open_payload)
+            for pocket_id, rows in open_payload.items():
+                dump_json(
+                    os.path.join(
+                        states[pocket_id]["adder"].debug_config["debug_output_root"],
+                        f"d{step}_{branch_id}_open_bonds.json"),
+                    rows)
             try:
                 selected_open = select_open_bond_across_pockets(
                     open_payload, step, pocket_weights, args.num_open_bonds_to_sample)
@@ -655,9 +663,15 @@ def run_multi_pocket(args):
             for pocket_id, rows, candidates in fragment_results:
                 fragment_payload[pocket_id] = rows
                 fragment_nodes[pocket_id] = candidates
+                pocket_debug_root = states[pocket_id]["adder"].debug_config["debug_output_root"]
+                dump_json(
+                    os.path.join(
+                        pocket_debug_root,
+                        f"d{step}_{branch_id}_fragment_candidates.json"),
+                    rows)
                 if len(candidates):
                     mae_path = os.path.join(
-                        output_root, f"d{step}_{branch_id}_{pocket_id}_fragment_candidates.mae")
+                        pocket_debug_root, f"d{step}_{branch_id}_fragment_candidates.mae")
                     dump_fragment_mae(mae_path, candidates)
 
             dump_json(

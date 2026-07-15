@@ -42,9 +42,11 @@ class FragmentAdder(ABC):
         """
         Initialize logger to stdout
         """
-        self.logger = logging.getLogger(__name__)
+        self.logger = logging.getLogger(f"{__name__}.{id(self)}")
         self.logger.setLevel(logging.DEBUG if debug else logging.INFO)
-        self.logger.addHandler(logging.StreamHandler(sys.stdout))
+        self.logger.propagate = False
+        if not self.logger.handlers:
+            self.logger.addHandler(logging.StreamHandler(sys.stdout))
 
     def add_fragment_to_node(self, node, open_bond, fragname):
         struct, attachment_atom_idx = self.add_fragment(node.ligand, open_bond, fragname)
