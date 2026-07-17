@@ -97,7 +97,12 @@ class FragmentAdder(ABC):
             #print(fragname, h_id)
             id_base = list(frag_copy.atom[h_id].bonded_atoms)[0].index
 
-            renumbered = build.attach_structure(struct, from_atom, to_atom, frag_copy, id_base, h_id)
+            # ``struct`` is a copy of ``ligand``.  Pass atom indices rather than
+            # atom objects from the original structure, otherwise attachments
+            # can be made against stale atom handles when deleting a hydrogen
+            # renumbers atoms before the attachment atom.
+            renumbered = build.attach_structure(
+                struct, from_atom.index, to_atom.index, frag_copy, id_base, h_id)
             if (self.frag_set.is_tricky(fragname, h_id)):
                 self.frag_set.realign(ligand, open_bond, struct, renumbered)
         else:
