@@ -49,7 +49,8 @@ class FragmentAdder(ABC):
             self.logger.addHandler(logging.StreamHandler(sys.stdout))
 
     def add_fragment_to_node(self, node, open_bond, fragname):
-        struct, attachment_atom_idx = self.add_fragment(node.ligand, open_bond, fragname)
+        struct, attachment_atom_idx, core_indices, frag_indices = self.add_fragment(
+            node.ligand, open_bond, fragname)
 
         new_node = LigandNode(node.protein, struct,
                               parent_ligand_size=node.ligand.atom_total,
@@ -58,6 +59,7 @@ class FragmentAdder(ABC):
                               fragname=fragname,
                               original_atom_idx=open_bond[0].index
                               )
+        new_node.set_core_fragment_indices(core_indices, frag_indices)
         return new_node
 
     def add_fragment(self, ligand, open_bond, fragname):
@@ -73,15 +75,21 @@ class FragmentAdder(ABC):
         :param fragname: Fragment name to attach to the bond
         :type fragname: str
 
-        :return: Structure object with the fragment attached and
-            new index of the non-hydrogen atom in the open bond
-        :rtype: schrodinger.structure.Structure, int
+        :return: Structure object with the fragment attached, the new index of
+            the non-hydrogen atom in the open bond, indices belonging to the
+            original ligand core, and indices belonging to the added fragment.
+        :rtype: schrodinger.structure.Structure, int, [int], [int]
         """
         from_atom, to_atom = open_bond
         # to_atom should be the hydrogen
         assert to_atom.atomic_number == 1
 
         struct = ligand.copy()
+        core_marker = 'i_FRAME_original_ligand_atom'
+        attachment_marker = 'i_FRAME_attachment_atom'
+        for atom in struct.atom:
+            atom.property[core_marker] = 1
+        struct.atom[from_atom.index].property[attachment_marker] = 1
 
         # renumbered is a dictionary of atom renumbering. Keys are old atom
         # numbers, values are new atom numbers (or None if the atom was deleted,
@@ -97,12 +105,13 @@ class FragmentAdder(ABC):
             #print(fragname, h_id)
             id_base = list(frag_copy.atom[h_id].bonded_atoms)[0].index
 
-            # ``struct`` is a copy of ``ligand``.  Pass atom indices rather than
-            # atom objects from the original structure, otherwise attachments
-            # can be made against stale atom handles when deleting a hydrogen
-            # renumbers atoms before the attachment atom.
+            # ``struct`` is a copy of ``ligand``.  Use atom handles from that
+            # copy for attach_structure so the parent attachment atom remains
+            # anchored even if deleting a lower-index hydrogen renumbers atoms
+            # before the new bond is created.
             renumbered = build.attach_structure(
-                struct, from_atom.index, to_atom.index, frag_copy, id_base, h_id)
+                struct, struct.atom[from_atom.index], struct.atom[to_atom.index],
+                frag_copy, id_base, h_id)
             if (self.frag_set.is_tricky(fragname, h_id)):
                 self.frag_set.realign(ligand, open_bond, struct, renumbered)
         else:
@@ -113,12 +122,31 @@ class FragmentAdder(ABC):
         # bond being attached to
 
         if renumbered is not None:
-            attachment_atom_idx = renumbered[from_atom.index]
             assert not renumbered[to_atom.index], "Hydrogen should have been removed"
-        else:
-            attachment_atom_idx = from_atom.index
 
-        return struct, attachment_atom_idx
+        core_indices = [
+            atom.index for atom in struct.atom
+            if atom.property.get(core_marker)
+        ]
+        attachment_atoms = [
+            atom.index for atom in struct.atom
+            if atom.property.get(attachment_marker)
+        ]
+        assert len(attachment_atoms) == 1, \
+            f"Expected one marked attachment atom, found {attachment_atoms}"
+        attachment_atom_idx = attachment_atoms[0]
+
+        core_index_set = set(core_indices)
+        frag_indices = [
+            atom.index for atom in struct.atom
+            if atom.index not in core_index_set
+        ]
+
+        for atom in struct.atom:
+            atom.property.pop(core_marker, None)
+            atom.property.pop(attachment_marker, None)
+
+        return struct, attachment_atom_idx, core_indices, frag_indices
 
     @staticmethod
     def get_open_bonds(structure):

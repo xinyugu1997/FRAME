@@ -92,14 +92,16 @@ class LigandNode:
         """
         if self.branchpoint_atom_idx is None:
             attachment_atom_bonds = get_bonded_indices(self.ligand, self.get_attachment_atom())
+            fragment_index_set = set(self.added_fragment_atom_ids())
             fragment_neighbors = [
                 atom_idx for atom_idx in attachment_atom_bonds
-                if atom_idx >= self.parent_ligand_size
+                if atom_idx in fragment_index_set
             ]
             assert len(fragment_neighbors) == 1, \
-                "Expected exactly one newly added fragment atom bonded to " \
+                "Expected exactly one added-fragment atom bonded to " \
                 f"attachment atom {self.get_attachment_atom()}, found " \
-                f"{fragment_neighbors} among {attachment_atom_bonds}"
+                f"{fragment_neighbors} among bonds {attachment_atom_bonds}; " \
+                f"fragment indices are {sorted(fragment_index_set)}"
             branchpoint_atom_idx = fragment_neighbors[0]
 
             self.branchpoint_atom_idx = branchpoint_atom_idx
@@ -211,6 +213,8 @@ class LigandNode:
 
         newnode.branchpoint_atom_idx = self.branchpoint_atom_idx
         newnode.dihedral_atoms = self.dihedral_atoms
+        newnode.core_indices = self.core_indices
+        newnode.frag_indices = self.frag_indices
 
         return newnode
 
