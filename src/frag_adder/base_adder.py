@@ -141,6 +141,13 @@ class FragmentAdder(ABC):
             atom.index for atom in struct.atom
             if atom.index not in core_index_set
         ]
+        # Deleted atoms are reported as None in the renumbering map.  Keep the
+        # fragment index list to real atoms only so the removed attachment H is
+        # not treated as part of the added fragment.
+        frag_indices = [
+            atom_idx for atom_idx in frag_indices
+            if atom_idx is not None
+        ]
 
         for atom in struct.atom:
             atom.property.pop(core_marker, None)
