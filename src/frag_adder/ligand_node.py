@@ -118,8 +118,10 @@ class LigandNode:
         This calculates how much internal clash there is within a structure.
         """
         if self.ligand_clash is None:
-            fragment_indices = self.added_fragment_atom_ids()
-            core_indices = self.get_core_indices()
+            fragment_indices = self._remove_deleted_atom_indices(
+                self.added_fragment_atom_ids())
+            core_indices = self._remove_deleted_atom_indices(
+                self.get_core_indices())
 
             clash = interactions.steric_clash.clash_volume(self.ligand, core_indices, None, fragment_indices)
             branch_atom = self.get_branchpoint_atom()
@@ -129,11 +131,27 @@ class LigandNode:
 
         return self.ligand_clash
 
+    @staticmethod
+    def _remove_deleted_atom_indices(atom_indices):
+        """Return only real atom indices, dropping deleted atoms.
+
+        The frag_indices returned directly by FragmentAdder.add_fragment are
+        built from live structure atoms and should not contain None.  This
+        helper is a defensive boundary for node state loaded, copied, or set
+        through other paths where Schrodinger renumbering-map values may have
+        leaked in; those maps use None for deleted atoms such as the
+        open-bond hydrogen.
+        """
+        return [
+            atom_idx for atom_idx in atom_indices
+            if atom_idx is not None
+        ]
+
     def added_fragment_atom_ids(self):
         if self.frag_indices is None:
             return list(range(self.parent_ligand_size, self.ligand.atom_total + 1))
         else:
-            return self.frag_indices
+            return self._remove_deleted_atom_indices(self.frag_indices)
 
     def get_fragment_st(self):
         return self.ligand.extract(self.added_fragment_atom_ids())
@@ -142,7 +160,7 @@ class LigandNode:
         if self.core_indices is None:
             return [a.index for a in self.ligand.atom if (a.index < self.parent_ligand_size)]
         else:
-            return self.core_indices
+            return self._remove_deleted_atom_indices(self.core_indices)
 
     def get_core_st(self):
         return self.ligand.extract(self.get_core_indices())
@@ -193,8 +211,8 @@ class LigandNode:
 
 
     def set_core_fragment_indices(self, core_indices, frag_indices):
-        self.core_indices = core_indices
-        self.frag_indices = frag_indices
+        self.core_indices = self._remove_deleted_atom_indices(core_indices)
+        self.frag_indices = self._remove_deleted_atom_indices(frag_indices)
 
     def get_mw(self):
         return self.ligand.total_weight

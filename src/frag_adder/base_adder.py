@@ -141,6 +141,8 @@ class FragmentAdder(ABC):
             atom.index for atom in struct.atom
             if atom.index not in core_index_set
         ]
+        assert None not in frag_indices, \
+            "Fragment indices built from structure atoms should not include None"
 
         for atom in struct.atom:
             atom.property.pop(core_marker, None)
