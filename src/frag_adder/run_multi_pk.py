@@ -451,6 +451,10 @@ def dump_json(path, obj):
         json.dump(obj, handle, indent=2)
 
 
+def debug_outputs_enabled(args):
+    return bool(getattr(args, "debug_outputs", False))
+
+
 def dump_fragment_mae(path, candidates):
     candidate_nodes = LigandNode_List()
     for node in candidates:
@@ -591,7 +595,8 @@ def run_multi_pocket(args):
     config = get_config(args.config_name)
     config["max_depth"] = args.max_steps
     config["goal_type"] = "number_steps"
-    config["advanced_config"]["save_candidate_scores_json"] = True
+    config["advanced_config"]["save_candidate_scores_json"] = debug_outputs_enabled(args)
+    config["advanced_config"]["log_to_file"] = debug_outputs_enabled(args)
 
     output_root = args.output_folder_path
     os.makedirs(output_root, exist_ok=True)
@@ -606,7 +611,8 @@ def run_multi_pocket(args):
         pocket = read_mae(pocket_path)[0]
         pocket_config = copy.deepcopy(config)
         pocket_debug_root = os.path.join(output_root, pocket_id)
-        os.makedirs(pocket_debug_root, exist_ok=True)
+        if debug_outputs_enabled(args):
+            os.makedirs(pocket_debug_root, exist_ok=True)
         pocket_config["advanced_config"]["debug_output_root"] = pocket_debug_root + os.sep
         pocket_config["advanced_config"]["log_file"] = os.path.join(
             pocket_debug_root, "debug.log")
@@ -632,24 +638,26 @@ def run_multi_pocket(args):
                 ]
                 open_payload = dict(executor.map(score_open_bonds_for_pocket, jobs))
 
-            dump_json(
-                os.path.join(output_root, f"d{step}_{branch_id}_open_bonds_all_pockets.json"),
-                open_payload)
-            for pocket_id, rows in open_payload.items():
+            if debug_outputs_enabled(args):
                 dump_json(
-                    os.path.join(
-                        states[pocket_id]["adder"].debug_config["debug_output_root"],
-                        f"d{step}_{branch_id}_open_bonds.json"),
-                    rows)
+                    os.path.join(output_root, f"d{step}_{branch_id}_open_bonds_all_pockets.json"),
+                    open_payload)
+                for pocket_id, rows in open_payload.items():
+                    dump_json(
+                        os.path.join(
+                            states[pocket_id]["adder"].debug_config["debug_output_root"],
+                            f"d{step}_{branch_id}_open_bonds.json"),
+                        rows)
             try:
                 selected_open = select_open_bond_across_pockets(
                     open_payload, step, pocket_weights, args.num_open_bonds_to_sample)
             except BranchExhaustedError as error:
                 save_stopped_branch(output_root, branch, step, error)
                 continue
-            dump_json(
-                os.path.join(output_root, f"d{step}_{branch_id}_selected_open_bonds.json"),
-                selected_open)
+            if debug_outputs_enabled(args):
+                dump_json(
+                    os.path.join(output_root, f"d{step}_{branch_id}_selected_open_bonds.json"),
+                    selected_open)
 
             with ThreadPoolExecutor(max_workers=len(states)) as executor:
                 jobs = [
@@ -663,29 +671,32 @@ def run_multi_pocket(args):
             for pocket_id, rows, candidates in fragment_results:
                 fragment_payload[pocket_id] = rows
                 fragment_nodes[pocket_id] = candidates
-                pocket_debug_root = states[pocket_id]["adder"].debug_config["debug_output_root"]
-                dump_json(
-                    os.path.join(
-                        pocket_debug_root,
-                        f"d{step}_{branch_id}_fragment_candidates.json"),
-                    rows)
-                if len(candidates):
-                    mae_path = os.path.join(
-                        pocket_debug_root, f"d{step}_{branch_id}_fragment_candidates.mae")
-                    dump_fragment_mae(mae_path, candidates)
+                if debug_outputs_enabled(args):
+                    pocket_debug_root = states[pocket_id]["adder"].debug_config["debug_output_root"]
+                    dump_json(
+                        os.path.join(
+                            pocket_debug_root,
+                            f"d{step}_{branch_id}_fragment_candidates.json"),
+                        rows)
+                    if len(candidates):
+                        mae_path = os.path.join(
+                            pocket_debug_root, f"d{step}_{branch_id}_fragment_candidates.mae")
+                        dump_fragment_mae(mae_path, candidates)
 
-            dump_json(
-                os.path.join(output_root, f"d{step}_{branch_id}_fragment_candidates_all_pockets.json"),
-                fragment_payload)
+            if debug_outputs_enabled(args):
+                dump_json(
+                    os.path.join(output_root, f"d{step}_{branch_id}_fragment_candidates_all_pockets.json"),
+                    fragment_payload)
             try:
                 selected_frag = select_fragment_across_pockets(
                     fragment_payload, step, pocket_weights, args.num_fragments_to_sample)
             except BranchExhaustedError as error:
                 save_stopped_branch(output_root, branch, step, error)
                 continue
-            dump_json(
-                os.path.join(output_root, f"d{step}_{branch_id}_selected_fragments.json"),
-                selected_frag)
+            if debug_outputs_enabled(args):
+                dump_json(
+                    os.path.join(output_root, f"d{step}_{branch_id}_selected_fragments.json"),
+                    selected_frag)
 
             for selection_idx, selected in enumerate(selected_frag["fragments"]):
                 next_states = {}
@@ -735,6 +746,8 @@ def get_args():
                              "weighted-score softmax before de-duplication.")
     parser.add_argument("--random_seed", type=int, default=10,
                         help="Random seed for softmax open-bond sampling.")
+    parser.add_argument("--debug_outputs", action="store_true",
+                        help="Write run_multi_pk intermediate debug JSON/MAE files and per-pocket debug.log files.")
     parser.add_argument("--e3nn_env_path", type=str,
                         default="/oak/stanford/groups/rondror/projects/ligand-docking/fragment_building/software/anaconda3/envs/e3nn/lib/python3.8/site-packages")
     return parser.parse_args()
