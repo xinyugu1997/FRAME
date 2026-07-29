@@ -649,7 +649,6 @@ def initialize_multi_pocket_states(config, args, ligand_paths, pocket_paths, dep
 def load_checkpoint_branches(checkpoint_path, config, args, pocket_paths):
     checkpoint_path, manifest = resolve_checkpoint_manifest(checkpoint_path)
     checkpoint_dir = os.path.dirname(checkpoint_path)
-    load_random_state(manifest.get("random_state"))
     branches = []
     for branch_record in manifest["branches"]:
         ligand_paths = []
@@ -665,6 +664,10 @@ def load_checkpoint_branches(checkpoint_path, config, args, pocket_paths):
         )
         branches.append(dict(branch_id=branch_record["branch_id"], states=states))
 
+    # Adder initialization reseeds the module-level random generator. Restore
+    # the checkpoint only after every adder has been rebuilt so resumed growth
+    # continues from the saved generator position.
+    load_random_state(manifest.get("random_state"))
     return int(manifest["depth"]), branches
 
 
