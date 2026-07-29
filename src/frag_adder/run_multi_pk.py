@@ -1,4 +1,5 @@
 import argparse
+import ast
 import copy
 import json
 import math
@@ -499,6 +500,43 @@ def save_stopped_branch(output_root, branch, step, reason):
     )
 
 
+def checkpoint_manifest_path(output_root, depth):
+    return os.path.join(output_root, f"checkpoint_d{depth}.json")
+
+
+def save_depth_checkpoint(output_root, branches, depth, args):
+    """Save restartable branch state after a completed depth step."""
+    manifest = dict(
+        depth=int(depth),
+        random_state=repr(random.getstate()),
+        max_steps=int(args.max_steps),
+        branches=[],
+    )
+    for branch in branches:
+        branch_record = dict(branch_id=branch["branch_id"], pockets={})
+        for pocket_id, state in branch["states"].items():
+            ligand_path = os.path.join(
+                output_root,
+                f"checkpoint_d{depth}_{branch['branch_id']}_{pocket_id}.mae",
+            )
+            write_mae(ligand_path, [state["node"].ligand])
+            branch_record["pockets"][pocket_id] = os.path.basename(ligand_path)
+        manifest["branches"].append(branch_record)
+
+    manifest_path = checkpoint_manifest_path(output_root, depth)
+    dump_json(manifest_path, manifest)
+    dump_json(
+        os.path.join(output_root, "checkpoint_latest.json"),
+        dict(checkpoint=os.path.basename(manifest_path), depth=int(depth)),
+    )
+
+
+def load_random_state(state_text):
+    """Restore a random module state saved by save_depth_checkpoint."""
+    if state_text:
+        random.setstate(ast.literal_eval(state_text))
+
+
 def resolve_open_bond_by_atoms(adder, parent_node, atom_from, atom_h):
     for open_bond in adder.get_open_bonds(parent_node.ligand):
         if open_bond[0].index == atom_from and open_bond[1].index == atom_h:
@@ -586,6 +624,74 @@ def initialize_adder(config, e3nn_env_path):
     raise ValueError(f"Unsupported adder_type: {adder_type}")
 
 
+def initialize_multi_pocket_states(config, args, ligand_paths, pocket_paths, depth=0):
+    states = {}
+    for i, (ligand_path, pocket_path) in enumerate(zip(ligand_paths, pocket_paths)):
+        pocket_id = f"pk{i}"
+        ligand = read_mae(ligand_path)[0]
+        pocket = read_mae(pocket_path)[0]
+        pocket_config = copy.deepcopy(config)
+        pocket_debug_root = os.path.join(args.output_folder_path, pocket_id)
+        if debug_outputs_enabled(args):
+            os.makedirs(pocket_debug_root, exist_ok=True)
+        pocket_config["advanced_config"]["debug_output_root"] = pocket_debug_root + os.sep
+        pocket_config["advanced_config"]["log_file"] = os.path.join(
+            pocket_debug_root, "debug.log")
+        adder = initialize_adder(pocket_config, args.e3nn_env_path)
+        adder.goal = {"type": "depth", "value": args.max_steps}
+        states[pocket_id] = dict(
+            adder=adder,
+            node=LigandNode(pocket, ligand, depth=depth),
+        )
+    return states
+
+
+def load_checkpoint_branches(checkpoint_path, config, args, pocket_paths):
+    checkpoint_path, manifest = resolve_checkpoint_manifest(checkpoint_path)
+    checkpoint_dir = os.path.dirname(checkpoint_path)
+    branches = []
+    for branch_record in manifest["branches"]:
+        ligand_paths = []
+        for i in range(len(pocket_paths)):
+            pocket_id = f"pk{i}"
+            ligand_file = branch_record["pockets"][pocket_id]
+            ligand_paths.append(os.path.join(checkpoint_dir, ligand_file))
+        states = initialize_multi_pocket_states(
+            config, args, ligand_paths, pocket_paths, depth=int(manifest["depth"]))
+        validate_ligand_atom_index_consistency(
+            states,
+            context=f"checkpoint {checkpoint_path} branch {branch_record['branch_id']}",
+        )
+        branches.append(dict(branch_id=branch_record["branch_id"], states=states))
+
+    # Adder initialization reseeds the module-level random generator. Restore
+    # the checkpoint only after every adder has been rebuilt so resumed growth
+    # continues from the saved generator position.
+    load_random_state(manifest.get("random_state"))
+    return int(manifest["depth"]), branches
+
+
+def resolve_checkpoint_manifest(checkpoint_path):
+    """
+    Load either a real checkpoint manifest or checkpoint_latest.json.
+
+    checkpoint_latest.json is only a pointer, so resolve it once and return the
+    concrete checkpoint path whose directory owns the ligand files referenced by
+    the manifest.
+    """
+    checkpoint_path = os.path.abspath(checkpoint_path)
+    with open(checkpoint_path) as handle:
+        manifest = json.load(handle)
+
+    if "checkpoint" not in manifest or "branches" in manifest:
+        return checkpoint_path, manifest
+
+    checkpoint_path = os.path.join(
+        os.path.dirname(checkpoint_path), manifest["checkpoint"])
+    with open(checkpoint_path) as handle:
+        return checkpoint_path, json.load(handle)
+
+
 def run_multi_pocket(args):
     seed_paths = parse_csv_paths(args.seed_ligand_paths)
     pocket_paths = parse_csv_paths(args.protein_pocket_paths)
@@ -604,29 +710,21 @@ def run_multi_pocket(args):
     pocket_weights = parse_csv_floats(args.pocket_weights)
     random.seed(args.random_seed)
 
-    initial_states = {}
-    for i, (seed_path, pocket_path) in enumerate(zip(seed_paths, pocket_paths)):
-        pocket_id = f"pk{i}"
-        seed = read_mae(seed_path)[0]
-        pocket = read_mae(pocket_path)[0]
-        pocket_config = copy.deepcopy(config)
-        pocket_debug_root = os.path.join(output_root, pocket_id)
-        if debug_outputs_enabled(args):
-            os.makedirs(pocket_debug_root, exist_ok=True)
-        pocket_config["advanced_config"]["debug_output_root"] = pocket_debug_root + os.sep
-        pocket_config["advanced_config"]["log_file"] = os.path.join(
-            pocket_debug_root, "debug.log")
-        adder = initialize_adder(pocket_config, args.e3nn_env_path)
-        adder.goal = {"type": "depth", "value": args.max_steps}
-        initial_states[pocket_id] = dict(adder=adder, node=LigandNode(pocket, seed))
+    if args.resume_checkpoint:
+        completed_depth, branches = load_checkpoint_branches(
+            args.resume_checkpoint, config, args, pocket_paths)
+    else:
+        initial_states = initialize_multi_pocket_states(
+            config, args, seed_paths, pocket_paths, depth=0)
+        validate_ligand_atom_index_consistency(
+            initial_states,
+            context="initial multi-pocket seed ligands",
+        )
+        branches = [dict(branch_id="b0", states=initial_states)]
+        completed_depth = 0
+        save_depth_checkpoint(output_root, branches, completed_depth, args)
 
-    validate_ligand_atom_index_consistency(
-        initial_states,
-        context="initial multi-pocket seed ligands",
-    )
-
-    branches = [dict(branch_id="b0", states=initial_states)]
-    for step in range(1, args.max_steps + 1):
+    for step in range(completed_depth + 1, args.max_steps + 1):
         next_branches = []
         for branch in branches:
             branch_id = branch["branch_id"]
@@ -719,6 +817,8 @@ def run_multi_pocket(args):
                 )
                 next_branches.append(dict(branch_id=next_branch_id, states=next_states))
         branches = next_branches
+        if branches:
+            save_depth_checkpoint(output_root, branches, step, args)
         if not branches:
             break
 
@@ -748,6 +848,10 @@ def get_args():
                         help="Random seed for softmax open-bond sampling.")
     parser.add_argument("--debug_outputs", action="store_true",
                         help="Write run_multi_pk intermediate debug JSON/MAE files and per-pocket debug.log files.")
+    parser.add_argument("--resume_checkpoint", type=str, default="",
+                        help="Path to checkpoint_d<N>.json or checkpoint_latest.json "
+                             "from a previous run_multi_pk output folder. Growth "
+                             "continues from the saved depth.")
     parser.add_argument("--e3nn_env_path", type=str,
                         default="/oak/stanford/groups/rondror/projects/ligand-docking/fragment_building/software/anaconda3/envs/e3nn/lib/python3.8/site-packages")
     return parser.parse_args()
