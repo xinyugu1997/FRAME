@@ -815,10 +815,6 @@ def run_multi_pocket(args):
                     candidates = fragment_nodes[pocket_id]
                     if sel_idx < 0 or sel_idx >= len(candidates):
                         raise ValueError(f"Invalid fragment index {sel_idx} for {pocket_id}")
-                    out_file = os.path.join(
-                        output_root,
-                        f"d{step}_{next_branch_id}_{pocket_id}_selected_fragment.mae")
-                    write_mae(out_file, [candidates[sel_idx].ligand])
                     next_states[pocket_id] = dict(
                         adder=states[pocket_id]["adder"],
                         node=candidates[sel_idx],
