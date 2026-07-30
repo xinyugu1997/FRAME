@@ -650,6 +650,7 @@ def initialize_multi_pocket_states(config, args, ligand_paths, pocket_paths, dep
         pocket_config["advanced_config"]["log_file"] = os.path.join(
             pocket_debug_root, "debug.log")
         adder = initialize_adder(pocket_config, args.e3nn_env_path)
+        print(f"Using device for {pocket_id}: {getattr(adder, 'device', 'cpu')}")
         adder.goal = {"type": "depth", "value": args.max_steps}
         states[pocket_id] = dict(
             adder=adder,
