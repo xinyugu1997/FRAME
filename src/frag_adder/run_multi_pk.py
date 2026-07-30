@@ -650,6 +650,7 @@ def initialize_multi_pocket_states(config, args, ligand_paths, pocket_paths, dep
         pocket_config["advanced_config"]["log_file"] = os.path.join(
             pocket_debug_root, "debug.log")
         adder = initialize_adder(pocket_config, args.e3nn_env_path)
+        print(f"Using device for {pocket_id}: {getattr(adder, 'device', 'cpu')}")
         adder.goal = {"type": "depth", "value": args.max_steps}
         states[pocket_id] = dict(
             adder=adder,
@@ -815,10 +816,6 @@ def run_multi_pocket(args):
                     candidates = fragment_nodes[pocket_id]
                     if sel_idx < 0 or sel_idx >= len(candidates):
                         raise ValueError(f"Invalid fragment index {sel_idx} for {pocket_id}")
-                    out_file = os.path.join(
-                        output_root,
-                        f"d{step}_{next_branch_id}_{pocket_id}_selected_fragment.mae")
-                    write_mae(out_file, [candidates[sel_idx].ligand])
                     next_states[pocket_id] = dict(
                         adder=states[pocket_id]["adder"],
                         node=candidates[sel_idx],
