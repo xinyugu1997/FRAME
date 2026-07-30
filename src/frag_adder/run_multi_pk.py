@@ -387,6 +387,18 @@ def select_fragment_across_pockets(
         )
         if positive_weighted_score <= fragment_score_cutoff
     ]
+
+    if not common_frag_ids:
+        raise BranchExhaustedError(
+            "No fragment candidate passed the score pre-filter "
+            f"at step {step_idx}: "
+            f"cutoff_ratio={cutoff_ratio}, "
+            f"lowest_fragment_score={lowest_fragment_score}, "
+            f"highest_fragment_score={highest_fragment_score}, "
+            f"fragment_score_cutoff={fragment_score_cutoff}, "
+            f"positive_weighted_scores={positive_weighted_scores}"
+        )
+
     # Step 2: weighted score for each fragment that passed the pre-filter.
     weighted_scores = []
     for frag_id in common_frag_ids:
