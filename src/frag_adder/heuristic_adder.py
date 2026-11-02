@@ -100,22 +100,18 @@ class HeuristicFragmentAdder(FragmentAdder, ABC):
             self.logger.info(f"Using a number of steps as goal")
             self.goal = {'type': 'depth', 'value': self.max_depth}
 
-        if self.stop_after_open_bond_stage or self.stop_after_fragment_stage or \
+        manual_mode = self.stop_after_open_bond_stage or self.stop_after_fragment_stage or \
                 (self.selected_fragment_index is not None) or \
-                (self.selected_open_atom_from is not None) or (self.selected_open_atom_h is not None):
+                (self.selected_open_atom_from is not None) or (self.selected_open_atom_h is not None)
+        if manual_mode:
             solution = self.manual_step_search(start)
-            if self.debug_config['save_solutions'] and (solution is not None) and (len(solution) > 1):
-                def title_format_func(node):
-                    f = node.fragname or "None"
-                    s = node.score or 0
-                    return f"d{node.depth}_{f}_{s:.2f}"
-                solution.write_to_file(output_filename, title_format_func, include_protein=True)
-            return solution
         elif self.search_strategy == 'beam':
             solution = self.beam_search(start, self.beam_width)
         else:
             solution = self.greedy_search(start)
         if len(solution) == 1:
+            if manual_mode:
+                return solution
             self.logger.info(f"Cannot find any valid fragments to add to ligand...")
             return
 
@@ -130,9 +126,6 @@ class HeuristicFragmentAdder(FragmentAdder, ABC):
             solution.write_to_file(output_filename, title_format_func, include_protein=True)
 
         return solution
-
-    def _score_open_bonds(self, open_bonds):
-        return [float(self.open_bond_scorefxn(ob, self.goal)) for ob in open_bonds]
 
     def _write_hook_records(self, records, file_name):
         with open(file_name, "w") as handle:
@@ -178,11 +171,10 @@ class HeuristicFragmentAdder(FragmentAdder, ABC):
         parent_node = start
         depth = parent_node.depth + 1
 
-        # Fastest stage-3 path: directly select the chosen candidate from a
-        # stage-2 MAE file, avoiding fragment re-sampling/scoring.
+        # Read the saved candidate so restart never resamples fragments.
         if (self.selected_fragment_index is not None) and self.fragment_candidates_mae_path:
             candidates = read_mae(self.fragment_candidates_mae_path)
-            if self.selected_fragment_index < 0 or self.selected_fragment_index >= len(candidates):
+            if not 0 <= self.selected_fragment_index < len(candidates):
                 raise ValueError(f"Invalid selected_fragment_index {self.selected_fragment_index}, "
                                  f"expected [0, {len(candidates) - 1}] for file {self.fragment_candidates_mae_path}")
             selected_ligand = candidates[self.selected_fragment_index]
@@ -211,7 +203,7 @@ class HeuristicFragmentAdder(FragmentAdder, ABC):
                 self.logger.info("No open bonds found at manual stage.")
                 return solution
 
-            open_bond_scores = self._score_open_bonds(open_bonds)
+            open_bond_scores = [float(self.open_bond_scorefxn(ob, self.goal)) for ob in open_bonds]
             open_bond_records = []
             for idx, (candidate_open_bond, score) in enumerate(zip(open_bonds, open_bond_scores)):
                 open_bond_records.append(dict(
@@ -268,8 +260,6 @@ class HeuristicFragmentAdder(FragmentAdder, ABC):
             return solution
 
         raise ValueError("Stage-3 selection requires --fragment_candidates_mae_path to avoid fragment re-sampling.")
-
-        return solution
 
     def beam_search(self, start, beam_width):
         """

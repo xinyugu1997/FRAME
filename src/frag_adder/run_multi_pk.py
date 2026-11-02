@@ -28,29 +28,17 @@ def parse_csv_floats(text):
     return [float(x.strip()) for x in text.split(",") if x.strip()]
 
 
-def _bonded_atom_indices(atom):
-    return sorted(neighbor.index for neighbor in atom.bonded_atoms)
-
-
 def _atom_identity(atom):
     return dict(
         index=int(atom.index),
         element=atom.element,
         atomic_number=int(atom.atomic_number),
-        bonded_atom_indices=_bonded_atom_indices(atom),
+        bonded_atom_indices=sorted(neighbor.index for neighbor in atom.bonded_atoms),
     )
 
 
 def validate_ligand_atom_index_consistency(states, context):
-    """
-    Validate that each pocket's ligand uses the same atom-index identity map.
-
-    Multi-pocket selection matches open bonds across pockets by atom index, so
-    every pocket must keep the same atom index -> chemical atom mapping during
-    the whole growth trajectory. Coordinates are intentionally ignored because
-    each pocket can have a different 3D pose; atom count, element/atomic number,
-    and bonded-neighbor indices must remain identical.
-    """
+    """Require matching atom indices and connectivity; pocket poses may differ."""
     if not states:
         raise ValueError(f"{context}: no pocket states were provided")
 
@@ -81,29 +69,9 @@ def validate_ligand_atom_index_consistency(states, context):
 def select_open_bond_across_pockets(
         open_bond_payload, step_idx, pocket_weights=None,
         num_open_bonds_to_sample=1):
-    """
-    Select open bonds by weighted multi-pocket scores and softmax sampling.
+    """Sample bonds shared by every pocket using softmax of negated weighted scores.
 
-    Open bonds are matched by their ligand atom ids, (atom_from, atom_h). Only
-    bonds available in every pocket are considered, because selected bonds must
-    be usable for fragment scoring in all pockets. For each common bond, compute
-    the weighted score sum across pockets. Since lower scores are better in
-    FRAME, sampling probabilities are computed with softmax over the negated
-    weighted scores. Sampling is performed with replacement, then duplicate bond
-    selections are removed while preserving sampling order.
-
-    Returns:
-      {
-        "open_bonds": [
-          {
-            "atom_from": int,
-            "atom_h": int,
-            "score": float,
-            "probability": float,
-            "scores_by_pocket": {"<pocket_id>": float}
-          }
-        ]
-      }
+    Only positive weights contribute. Draw with replacement, then deduplicate.
     """
     if not open_bond_payload:
         raise ValueError("No open-bond payloads were provided")
@@ -156,12 +124,8 @@ def select_open_bond_across_pockets(
         common_bonds, weights=probabilities, k=num_open_bonds_to_sample)
 
     selected_bonds = []
-    seen = set()
     probability_by_bond = dict(zip(common_bonds, probabilities))
-    for bond_key in sampled_bonds:
-        if bond_key in seen:
-            continue
-        seen.add(bond_key)
+    for bond_key in dict.fromkeys(sampled_bonds):
         atom_from, atom_h = bond_key
         selected_bonds.append(dict(
             atom_from=atom_from,
@@ -174,116 +138,6 @@ def select_open_bond_across_pockets(
     return dict(open_bonds=selected_bonds)
 
 
-#def select_fragment_across_pockets(
-#        fragment_payload, step_idx, pocket_weights=None,
-#        num_fragments_to_sample=1):
-#    """
-#    Select fragments by weighted best-dihedral scores across pockets.
-#
-#    Fragment candidates are grouped by (open_atom_from, open_atom_h, fragname).
-#    Within each pocket and fragment group, only the candidate dihedral with the
-#    lowest score is kept. The kept scores are combined with pocket weights,
-#    converted into sampling probabilities with softmax over negated weighted
-#    scores, sampled with replacement, and de-duplicated while preserving sample
-#    order.
-#
-#    Returns:
-#      {
-#        "fragments": [
-#          {
-#            "fragname": str,
-#            "open_atom_from": int,
-#            "open_atom_h": int,
-#            "score": float,
-#            "probability": float,
-#            "scores_by_pocket": {"<pocket_id>": float},
-#            "indices_by_pocket": {"<pocket_id>": int}
-#          }
-#        ]
-#      }
-#    """
-#    if not fragment_payload:
-#        raise ValueError("No fragment payloads were provided")
-#    if num_fragments_to_sample < 1:
-#        raise ValueError("num_fragments_to_sample must be >= 1")
-#
-#    pocket_ids = list(fragment_payload.keys())
-#    if pocket_weights is None or len(pocket_weights) == 0:
-#        pocket_weights = [1.0 for _ in pocket_ids]
-#    if len(pocket_weights) != len(pocket_ids):
-#        raise ValueError(
-#            f"Expected {len(pocket_ids)} pocket weights, got {len(pocket_weights)}")
-#
-#    weights_by_pocket = dict(zip(pocket_ids, pocket_weights))
-#    best_by_fragment = {}
-#    expected_pocket_count = len(fragment_payload)
-#
-#    for pocket_id, rows in fragment_payload.items():
-#        for row in rows:
-#            fragment_key = (
-#                row.get("open_atom_from"),
-#                row.get("open_atom_h"),
-#                row["fragname"],
-#            )
-#            score = float(row["score"])
-#            current_best = best_by_fragment.setdefault(fragment_key, {}).get(pocket_id)
-#            if current_best is None or score < current_best["score"]:
-#                best_by_fragment[fragment_key][pocket_id] = dict(
-#                    score=score,
-#                    idx=int(row["idx"]),
-#                )
-#
-#    common_fragments = [
-#        fragment_key
-#        for fragment_key, pocket_rows in best_by_fragment.items()
-#        if len(pocket_rows) == expected_pocket_count
-#    ]
-#    if not common_fragments:
-#        raise ValueError("No fragment candidate is available in every pocket")
-#
-#    weighted_scores_by_fragment = {}
-#    scores_by_fragment = {}
-#    indices_by_fragment = {}
-#    for fragment_key in common_fragments:
-#        weighted_score = 0.0
-#        scores_by_fragment[fragment_key] = {}
-#        indices_by_fragment[fragment_key] = {}
-#        for pocket_id, best_row in best_by_fragment[fragment_key].items():
-#            weighted_score += weights_by_pocket[pocket_id] * best_row["score"]
-#            scores_by_fragment[fragment_key][pocket_id] = best_row["score"]
-#            indices_by_fragment[fragment_key][pocket_id] = best_row["idx"]
-#        weighted_scores_by_fragment[fragment_key] = weighted_score
-#
-#    logits = [-weighted_scores_by_fragment[key] for key in common_fragments]
-#    max_logit = max(logits)
-#    exp_logits = [math.exp(logit - max_logit) for logit in logits]
-#    normalizer = sum(exp_logits)
-#    probabilities = [value / normalizer for value in exp_logits]
-#
-#    sampled_fragments = random.choices(
-#        common_fragments, weights=probabilities, k=num_fragments_to_sample)
-#
-#    selected_fragments = []
-#    seen = set()
-#    probability_by_fragment = dict(zip(common_fragments, probabilities))
-#    for fragment_key in sampled_fragments:
-#        if fragment_key in seen:
-#            continue
-#        seen.add(fragment_key)
-#        open_atom_from, open_atom_h, fragname = fragment_key
-#        selected_fragments.append(dict(
-#            fragname=fragname,
-#            open_atom_from=open_atom_from,
-#            open_atom_h=open_atom_h,
-#            score=weighted_scores_by_fragment[fragment_key],
-#            probability=probability_by_fragment[fragment_key],
-#            scores_by_pocket=scores_by_fragment[fragment_key],
-#            indices_by_pocket=indices_by_fragment[fragment_key],
-#        ))
-#
-#    return dict(fragments=selected_fragments)
-
-# lighter-version of select_fragment_across_pockets
 def select_fragment_across_pockets(
     fragment_payload,
     step_idx,
@@ -291,12 +145,10 @@ def select_fragment_across_pockets(
     num_fragments_to_sample=1,
     cutoff_ratio=0.2,
 ):
-    """
-    Memory-friendlier version:
-    - uses integer fragment IDs internally
-    - uses pocket indices internally
-    - reconstructs tuple/string fields only for selected fragments
-    - pre-filters with (1 - cutoff_ratio) * lowest + cutoff_ratio * highest
+    """Sample shared fragments using each pocket's best dihedral score.
+
+    Prefilter with positive weights, then sample with signed weights. Compact
+    integer IDs avoid storing nested dictionaries for every candidate.
     """
     if not fragment_payload:
         raise ValueError("No fragment payloads were provided")
@@ -314,7 +166,6 @@ def select_fragment_across_pockets(
             f"Expected {num_pockets} pocket weights, got {len(pocket_weights)}"
         )
 
-    pocket_to_idx = {pocket_id: i for i, pocket_id in enumerate(pocket_ids)}
     pocket_weights = [float(w) for w in pocket_weights]
 
     # fragment_key -> frag_id
@@ -328,9 +179,7 @@ def select_fragment_across_pockets(
     seen_pocket_count = []  # frag_id -> number of pockets observed
 
     # Pass 1: keep only the best dihedral per fragment-pocket pair
-    for pocket_id, rows in fragment_payload.items():
-        pocket_idx = pocket_to_idx[pocket_id]
-
+    for pocket_idx, rows in enumerate(fragment_payload.values()):
         for row in rows:
             fragment_key = (
                 row.get("open_atom_from"),
@@ -429,13 +278,7 @@ def select_fragment_across_pockets(
     }
 
     selected_fragments = []
-    seen = set()
-
-    for frag_id in sampled_frag_ids:
-        if frag_id in seen:
-            continue
-        seen.add(frag_id)
-
+    for frag_id in dict.fromkeys(sampled_frag_ids):
         pos = pos_by_frag_id[frag_id]
         open_atom_from, open_atom_h, fragname = frag_meta[frag_id]
 
@@ -459,13 +302,10 @@ def select_fragment_across_pockets(
 
     return dict(fragments=selected_fragments)
 
+
 def dump_json(path, obj):
     with open(path, "w") as handle:
         json.dump(obj, handle, indent=2)
-
-
-def debug_outputs_enabled(args):
-    return bool(getattr(args, "debug_outputs", False))
 
 
 def dump_fragment_mae(path, candidates):
@@ -489,13 +329,7 @@ def save_branch_ligands(output_root, branch, status_suffix="final"):
 
 
 def save_stopped_branch(output_root, branch, step, reason):
-    """
-    Save a branch that cannot be expanded further and record why it stopped.
-
-    The branch contains ligands after the previous completed growth step.  For
-    example, if expansion fails while attempting step 5, the saved ligands are
-    the depth-4 solution for that branch.
-    """
+    """Save the last completed depth and the reason this branch cannot grow."""
     stopped_depth = max(step - 1, 0)
     status_suffix = f"stopped_d{stopped_depth}_final"
     save_branch_ligands(output_root, branch, status_suffix=status_suffix)
@@ -510,10 +344,6 @@ def save_stopped_branch(output_root, branch, step, reason):
             reason=str(reason),
         ),
     )
-
-
-def checkpoint_manifest_path(output_root, depth):
-    return os.path.join(output_root, f"checkpoint_d{depth}.json")
 
 
 def save_depth_checkpoint(output_root, branches, depth, args):
@@ -535,7 +365,7 @@ def save_depth_checkpoint(output_root, branches, depth, args):
             branch_record["pockets"][pocket_id] = os.path.basename(ligand_path)
         manifest["branches"].append(branch_record)
 
-    manifest_path = checkpoint_manifest_path(output_root, depth)
+    manifest_path = os.path.join(output_root, f"checkpoint_d{depth}.json")
     dump_json(manifest_path, manifest)
     dump_json(
         os.path.join(output_root, "checkpoint_latest.json"),
@@ -638,13 +468,14 @@ def initialize_adder(config, e3nn_env_path):
 
 def initialize_multi_pocket_states(config, args, ligand_paths, pocket_paths, depth=0):
     states = {}
+    debug_outputs = bool(getattr(args, "debug_outputs", False))
     for i, (ligand_path, pocket_path) in enumerate(zip(ligand_paths, pocket_paths)):
         pocket_id = f"pk{i}"
         ligand = read_mae(ligand_path)[0]
         pocket = read_mae(pocket_path)[0]
         pocket_config = copy.deepcopy(config)
         pocket_debug_root = os.path.join(args.output_folder_path, pocket_id)
-        if debug_outputs_enabled(args):
+        if debug_outputs:
             os.makedirs(pocket_debug_root, exist_ok=True)
         pocket_config["advanced_config"]["debug_output_root"] = pocket_debug_root + os.sep
         pocket_config["advanced_config"]["log_file"] = os.path.join(
@@ -677,21 +508,13 @@ def load_checkpoint_branches(checkpoint_path, config, args, pocket_paths):
         )
         branches.append(dict(branch_id=branch_record["branch_id"], states=states))
 
-    # Adder initialization reseeds the module-level random generator. Restore
-    # the checkpoint only after every adder has been rebuilt so resumed growth
-    # continues from the saved generator position.
+    # Adder initialization reseeds random, so restore the checkpoint state last.
     load_random_state(manifest.get("random_state"))
     return int(manifest["depth"]), branches
 
 
 def resolve_checkpoint_manifest(checkpoint_path):
-    """
-    Load either a real checkpoint manifest or checkpoint_latest.json.
-
-    checkpoint_latest.json is only a pointer, so resolve it once and return the
-    concrete checkpoint path whose directory owns the ligand files referenced by
-    the manifest.
-    """
+    """Resolve the latest-checkpoint pointer relative to its own directory."""
     checkpoint_path = os.path.abspath(checkpoint_path)
     with open(checkpoint_path) as handle:
         manifest = json.load(handle)
@@ -706,6 +529,7 @@ def resolve_checkpoint_manifest(checkpoint_path):
 
 
 def run_multi_pocket(args):
+    debug_outputs = bool(getattr(args, "debug_outputs", False))
     seed_paths = parse_csv_paths(args.seed_ligand_paths)
     pocket_paths = parse_csv_paths(args.protein_pocket_paths)
     if len(seed_paths) != len(pocket_paths):
@@ -714,8 +538,8 @@ def run_multi_pocket(args):
     config = get_config(args.config_name)
     config["max_depth"] = args.max_steps
     config["goal_type"] = "number_steps"
-    config["advanced_config"]["save_candidate_scores_json"] = debug_outputs_enabled(args)
-    config["advanced_config"]["log_to_file"] = debug_outputs_enabled(args)
+    config["advanced_config"]["save_candidate_scores_json"] = debug_outputs
+    config["advanced_config"]["log_to_file"] = debug_outputs
 
     output_root = args.output_folder_path
     os.makedirs(output_root, exist_ok=True)
@@ -749,7 +573,7 @@ def run_multi_pocket(args):
                 ]
                 open_payload = dict(executor.map(score_open_bonds_for_pocket, jobs))
 
-            if debug_outputs_enabled(args):
+            if debug_outputs:
                 dump_json(
                     os.path.join(output_root, f"d{step}_{branch_id}_open_bonds_all_pockets.json"),
                     open_payload)
@@ -765,7 +589,7 @@ def run_multi_pocket(args):
             except BranchExhaustedError as error:
                 save_stopped_branch(output_root, branch, step, error)
                 continue
-            if debug_outputs_enabled(args):
+            if debug_outputs:
                 dump_json(
                     os.path.join(output_root, f"d{step}_{branch_id}_selected_open_bonds.json"),
                     selected_open)
@@ -782,7 +606,7 @@ def run_multi_pocket(args):
             for pocket_id, rows, candidates in fragment_results:
                 fragment_payload[pocket_id] = rows
                 fragment_nodes[pocket_id] = candidates
-                if debug_outputs_enabled(args):
+                if debug_outputs:
                     pocket_debug_root = states[pocket_id]["adder"].debug_config["debug_output_root"]
                     dump_json(
                         os.path.join(
@@ -794,7 +618,7 @@ def run_multi_pocket(args):
                             pocket_debug_root, f"d{step}_{branch_id}_fragment_candidates.mae")
                         dump_fragment_mae(mae_path, candidates)
 
-            if debug_outputs_enabled(args):
+            if debug_outputs:
                 dump_json(
                     os.path.join(output_root, f"d{step}_{branch_id}_fragment_candidates_all_pockets.json"),
                     fragment_payload)
@@ -804,7 +628,7 @@ def run_multi_pocket(args):
             except BranchExhaustedError as error:
                 save_stopped_branch(output_root, branch, step, error)
                 continue
-            if debug_outputs_enabled(args):
+            if debug_outputs:
                 dump_json(
                     os.path.join(output_root, f"d{step}_{branch_id}_selected_fragments.json"),
                     selected_frag)
@@ -864,10 +688,6 @@ def get_args():
     parser.add_argument("--e3nn_env_path", type=str,
                         default="/oak/stanford/groups/rondror/projects/ligand-docking/fragment_building/software/anaconda3/envs/e3nn/lib/python3.8/site-packages")
     return parser.parse_args()
-
-'''
-$SCHRODINGER/run python3 -m src.frag_adder.run_multi_pk --config_name config_ML --output_folder_path ./test_outputs --seed_ligand_path ./data/test_inputs/3C49_seed_ligand.mae --protein_pocket_path ./data/test_inputs/3C49_pocket.mae --end_point number_steps --max_steps 5
-'''
 
 
 def main():

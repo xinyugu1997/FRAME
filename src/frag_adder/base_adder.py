@@ -105,10 +105,7 @@ class FragmentAdder(ABC):
             #print(fragname, h_id)
             id_base = list(frag_copy.atom[h_id].bonded_atoms)[0].index
 
-            # ``struct`` is a copy of ``ligand``.  Use atom handles from that
-            # copy for attach_structure so the parent attachment atom remains
-            # anchored even if deleting a lower-index hydrogen renumbers atoms
-            # before the new bond is created.
+            # Use copied atom handles so hydrogen deletion cannot shift the attachment.
             renumbered = build.attach_structure(
                 struct, struct.atom[from_atom.index], struct.atom[to_atom.index],
                 frag_copy, id_base, h_id)
@@ -136,17 +133,9 @@ class FragmentAdder(ABC):
             f"Expected one marked attachment atom, found {attachment_atoms}"
         attachment_atom_idx = attachment_atoms[0]
 
-        core_index_set = set(core_indices)
         frag_indices = [
             atom.index for atom in struct.atom
-            if atom.index not in core_index_set
-        ]
-        # Deleted atoms are reported as None in the renumbering map.  Keep the
-        # fragment index list to real atoms only so the removed attachment H is
-        # not treated as part of the added fragment.
-        frag_indices = [
-            atom_idx for atom_idx in frag_indices
-            if atom_idx is not None
+            if not atom.property.get(core_marker)
         ]
 
         for atom in struct.atom:

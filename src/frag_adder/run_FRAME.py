@@ -45,7 +45,7 @@ def run_FRAME(args, config):
 
     #Load input files
     try:
-        seed_path = args.resume_ligand_path if args.resume_ligand_path else args.seed_ligand_path
+        seed_path = args.resume_ligand_path or args.seed_ligand_path
         seed = read_mae(seed_path)[0]
         pocket = read_mae(args.protein_pocket_path)[0]
     except:
