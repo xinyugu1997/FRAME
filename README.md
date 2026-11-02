@@ -5,6 +5,34 @@
 Code for Geometric deep learning for structure-based ligand design.
 A. Powers, H. Yu, P. Suriana, et. al. ACS Central Science, 2023
 
+### What's new in this fork
+
+This fork extends [Dror lab's FRAME](https://github.com/drorlab/FRAME) with
+controlled single-pocket growth and coordinated multi-pocket growth. The changes
+below cover the fork's April–July 2026 updates and subsequent code cleanup.
+
+| Update | Behavior |
+| --- | --- |
+| Beam search | `run_FRAME --search_strategy beam --beam_width K` retains the best K candidates across the current beam at each depth. Greedy search remains the default. |
+| Manual stages | Score attachment bonds, select a bond by atom indices, export scored fragment/conformation candidates, and choose a saved candidate without resampling. An intentional stage stop is treated as a valid result. |
+| Multi-pocket growth | `run_multi_pk` scores pockets concurrently, combines their scores with pocket weights, and samples shared bonds and fragments. Each distinct sampled fragment starts a separate trajectory with a pose for each pocket. |
+| Selection efficiency | Compact fragment IDs reduce bookkeeping. Each pocket contributes its best dihedral per fragment; a positive-weight score prefilter precedes signed-weight fragment sampling. |
+| Restart and exhausted branches | Save checkpoints after completed depths, resume through a manifest or latest-checkpoint pointer, and restore Python's random state after adder initialization. Exhausted branches save their last valid ligands and a reason while other branches continue. |
+| Attachment correctness | Track core and fragment atoms explicitly through hydrogen deletion and atom renumbering. Use copied atom handles for custom attachment, identify branchpoints by connectivity, preserve indices when copying nodes, and exclude deleted atoms from clash calculations. Multi-pocket growth validates matching atom-index identities and connectivity. |
+| Diagnostics and model robustness | Export candidate structures/scores, make multi-pocket debug files opt-in, isolate per-adder logging, report compute devices, and write the single-pocket configuration after CLI overrides. E3NN channel pooling preserves dimensions for single-atom selections. |
+
+See [examples/README.md](examples/README.md) for beam search, manual selection,
+multi-pocket scoring, checkpoint restart, and output descriptions. The four
+[RAR Slurm examples](examples/rar/) are adapted from the jobs under
+`/public/home/xinyu/RAR/lib` on the HPC: `ago`, `anta`, `multi_ago`, and
+`multi_anta`.
+
+For the dependency-free selection and checkpoint checks:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
 ### Installation
 
 FRAME uses Schrodinger python environment and structure objects to add fragments (https://newsite.schrodinger.com/python-api/).
@@ -40,16 +68,18 @@ Download and add files to `/data/source`.
 ### Running FRAME
 
 
-Example usage: 
+Example usage (run from the repository root):
+
+```bash
+"$SCHRODINGER/run" python3 -m src.frag_adder.run_FRAME \
+  --config_name config_ML \
+  --output_folder_path ./test_outputs/ \
+  --seed_ligand_path ./data/test_inputs/3C49_seed_ligand.mae \
+  --protein_pocket_path ./data/test_inputs/3C49_pocket.mae \
+  --end_point number_steps --max_steps 5 \
+  --e3nn_env_path /path/to/frame/lib/python3.8/site-packages
 ```
-$SCHRODINGER/run python3 -m src.frag_adder.run_FRAME
---config_name config_ML 
---output_folder_path ./test_outputs 
---seed_ligand_path ./data/test_inputs/3C49_seed_ligand.mae 
---protein_pocket_path ./data/test_inputs/3C49_pocket.mae 
---end_point number_steps --max_steps 5
---e3nn_env_path PATH
-```
+
 - seed_ligand_path is a the path to (.mae) file containing the starting ligand to add fragments to.
 - protein_pocket_path is a path to (.mae) file containing the protein pocket. The seed_ligand should be aligned or docked to pocket structure.
 - e3nn_env_path needs to be specified to allow access to e3nn package from SCHRODINGER environment
